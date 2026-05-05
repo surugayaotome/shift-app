@@ -56,7 +56,7 @@ engine = get_engine()
 def init_db():
     if engine is None: return
     
-    # 1つずつ独立した接続で実行し、エラーを他に波及させない
+    # 各命令をリスト化
     commands = [
         """
         CREATE TABLE IF NOT EXISTS shift_data (
@@ -84,21 +84,23 @@ def init_db():
     ]
 
     with engine.connect() as conn:
+        # 基本テーブルの作成（1つずつ確定させる）
         for cmd in commands:
             try:
                 conn.execute(text(cmd))
-                conn.commit() # 1命令ごとに確定
+                conn.commit() 
             except Exception:
-                pass # すでにテーブルがある場合などは無視
+                pass 
 
-        # staff_id の追加だけは ALTER なので個別にトライ
+        # 🚨 ALTER TABLE（カラム追加）は個別にトライ。失敗しても気にしない。
         try:
             conn.execute(text("ALTER TABLE staff_master ADD COLUMN staff_id TEXT;"))
             conn.commit()
         except Exception:
-            pass # すでにカラムがある場合は何もしない
+            # すでにカラムがある場合はここを通るが、commitは独立しているので次に影響しない
+            pass
 
-        # 初期店長データの投入
+        # 初期データの投入
         try:
             result = conn.execute(text("SELECT COUNT(*) FROM staff_master")).scalar()
             if result == 0:
