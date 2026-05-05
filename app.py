@@ -2,9 +2,11 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
+from sqlalchemy.pool import NullPool
 import io
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font
+import datetime
 
 st.set_page_config(page_title="日本橋乙女 シフト管理", layout="wide")
 
@@ -24,8 +26,6 @@ div[data-testid="stButton"] button[kind="primary"] {
 @st.cache_resource
 def get_engine():
     try:
-        from sqlalchemy.pool import NullPool  # 👈 追加：プール管理用のライブラリ
-
         raw_uri = st.secrets["database"]["uri"]
         prefix, rest = raw_uri.split("://")
         user_pass, host_db = rest.rsplit("@", 1)
@@ -43,10 +43,7 @@ def get_engine():
             database=db_name,
             query={"sslmode": "require"},
         )
-        
-        # 🚨 ここが真犯人対策！ SQLAlchemy側のプールを無効化する
         return create_engine(url_object, poolclass=NullPool)
-        
     except Exception as e:
         st.error(f"接続設定エラー: {e}")
         return None
@@ -56,7 +53,6 @@ engine = get_engine()
 def init_db():
     if engine is None: return
     with engine.connect() as conn:
-        # シフトテーブル
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS shift_data (
                 day TEXT,
@@ -66,7 +62,6 @@ def init_db():
                 PRIMARY KEY (day, staff_name)
             );
         """))
-        # スタッフマスタテーブル（新規）
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS staff_master (
                 staff_name TEXT PRIMARY KEY,
@@ -75,8 +70,14 @@ def init_db():
                 is_admin BOOLEAN DEFAULT FALSE
             );
         """))
+        # 募集設定保存用のテーブルを追加
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS system_config (
+                config_key TEXT PRIMARY KEY,
+                config_value TEXT
+            );
+        """))
         
-        # 初期管理者がいなければ作成（初回ログイン用）
         result = conn.execute(text("SELECT COUNT(*) FROM staff_master")).scalar()
         if result == 0:
             conn.execute(text("""
@@ -105,6 +106,20 @@ def save_day_data(day, df):
             """), {"day": day, "staff_name": row["氏名"], "off_status": row["休み"], "shift_json": shift_values})
         conn.commit()
 
+def save_config(key, value):
+    with engine.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO system_config (config_key, config_value) 
+            VALUES (:key, :value) 
+            ON CONFLICT (config_key) DO UPDATE SET config_value = :value
+        """), {"key": key, "value": str(value)})
+        conn.commit()
+
+def get_config(key, default_value=""):
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT config_value FROM system_config WHERE config_key = :key"), {"key": key}).scalar()
+        return result if result else default_value
+
 # ==========================================
 # 2. セッション（ログイン）管理
 # ==========================================
@@ -114,11 +129,8 @@ if "user" not in st.session_state:
 days_of_week = ["月", "火", "水", "木", "金", "土", "日"]
 time_slots = [f"{h}:{m:02d}" for h in range(10, 18) for m in (0, 30)]
 
-# --- ログイン画面 ---
 if st.session_state.user is None:
     st.title("🔐 ログイン")
-    st.info("初回は 名前:「店長」、パスワード:「admin1234」でログインしてください。")
-    
     with st.form("login_form"):
         input_name = st.text_input("氏名")
         input_pass = st.text_input("パスワード", type="password")
@@ -137,27 +149,25 @@ if st.session_state.user is None:
                 st.rerun()
             else:
                 st.error("氏名またはパスワードが間違っています。")
-    st.stop() # ログインしていない場合はここで処理を止める
+    st.stop()
 
-# --- サイドバー（ログアウト＆ユーザー情報） ---
 st.sidebar.write(f"👤 **{st.session_state.user['name']}** さん")
 st.sidebar.write(f"🏷️ 担当: {st.session_state.user['role']}")
 if st.sidebar.button("ログアウト"):
     st.session_state.user = None
     st.rerun()
-
 st.sidebar.markdown("---")
+
+staff_df = load_staff()
+staff_list = staff_df['staff_name'].tolist()
 
 # ==========================================
 # 3. メイン画面の分岐
 # ==========================================
-staff_df = load_staff()
-staff_list = staff_df['staff_name'].tolist()
-
 # 👨‍💼 管理者メニュー
 if st.session_state.user["is_admin"]:
     st.title("👨‍💼 管理者ダッシュボード")
-    tab1, tab2, tab3 = st.tabs(["📝 シフト編集", "👥 スタッフ管理", "📊 Excel出力"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📝 シフト編集", "📅 募集設定", "👥 スタッフ管理", "📊 Excel出力"])
     
     # 【タブ1】シフト編集
     with tab1:
@@ -188,12 +198,72 @@ if st.session_state.user["is_admin"]:
                     save_day_data(d, edited_df)
                     st.toast(f"✅ {d}曜日のデータを更新しました！")
 
-    # 【タブ2】スタッフ管理（担当・パスワードの登録）
+    # 【タブ2】募集設定（カレンダー）
     with tab2:
-        st.write("従業員の追加、削除、パスワード設定、権限の変更を行います。")
-        st.warning("※行を追加する場合は、表の一番下の空白行に入力してください。")
+        st.write("従業員画面に表示するシフト提出の対象期間と、締め切り日を設定します。")
         
-        # スタッフ管理用データエディタ
+        # デフォルトで今日から1週間分を計算
+        today = datetime.date.today()
+        default_period = (today, today + datetime.timedelta(days=6))
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            period = st.date_input("📅 シフト対象期間 (開始日 - 終了日)", value=default_period)
+        with col2:
+            deadline = st.date_input("⏳ 提出締め切り日", value=today + datetime.timedelta(days=3))
+            
+        if st.button("募集設定を更新", type="primary"):
+            if isinstance(period, tuple) and len(period) == 2:
+                save_config("period_start", period[0].strftime("%Y-%m-%d"))
+                save_config("period_end", period[1].strftime("%Y-%m-%d"))
+                save_config("deadline", deadline.strftime("%Y-%m-%d"))
+                st.success("✅ 募集設定を更新しました！従業員画面に反映されます。")
+            else:
+                st.error("⚠️ 期間の「開始日」と「終了日」の両方を選択してください。")
+
+    # 【タブ3】スタッフ管理（手動入力 ＋ CSVアップロード）
+    with tab2: # Wait, tabs changed. Correcting to tab3
+        pass # Overwritten below properly to avoid indent issues.
+
+    with tab3:
+        st.write("従業員の手動追加・パスワード設定、またはCSVでの一括登録を行います。")
+        
+        st.write("#### 📁 CSVで一括インポート")
+        st.info("A列から順に「氏名」「パスワード」「担当」「管理者権限(TRUE/FALSE)」となるCSVファイルを作成してください。")
+        uploaded_file = st.file_uploader("CSVファイルをアップロード", type=["csv"])
+        
+        if uploaded_file:
+            try:
+                df_csv = pd.read_csv(uploaded_file)
+                expected_cols = ["氏名", "パスワード", "担当", "管理者権限"]
+                
+                # A, B, C, Dの列が正確にマッピングされているか検証
+                if list(df_csv.columns)[:4] != expected_cols:
+                    st.error(f"⚠️ 列の定義が異なります。1行目は左から {expected_cols} の順にしてください。")
+                else:
+                    if st.button("CSVデータをデータベースに保存", type="primary"):
+                        with engine.connect() as conn:
+                            for _, row in df_csv.iterrows():
+                                is_admin_val = str(row["管理者権限"]).strip().lower() in ['true', '1', 'yes', 'はい']
+                                conn.execute(text("""
+                                    INSERT INTO staff_master (staff_name, password, role_name, is_admin)
+                                    VALUES (:name, :pass, :role, :is_admin)
+                                    ON CONFLICT (staff_name) DO UPDATE 
+                                    SET password = :pass, role_name = :role, is_admin = :is_admin
+                                """), {
+                                    "name": str(row["氏名"]),
+                                    "pass": str(row["パスワード"]),
+                                    "role": str(row["担当"]),
+                                    "is_admin": is_admin_val
+                                })
+                            conn.commit()
+                        st.success("✅ CSVからのインポートが完了しました！")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"CSV読み込みエラー: {e}")
+        
+        st.write("---")
+        st.write("#### ✍️ 手動編集")
         edited_staff = st.data_editor(
             staff_df,
             column_config={
@@ -206,12 +276,10 @@ if st.session_state.user["is_admin"]:
             hide_index=True,
             key="staff_editor"
         )
-        
-        if st.button("👥 スタッフ情報を一括保存", type="primary"):
-            # 空白の名前を除外
+        if st.button("手動編集を保存"):
             valid_staff = edited_staff[edited_staff['staff_name'].str.strip() != ""]
             with engine.connect() as conn:
-                conn.execute(text("DELETE FROM staff_master")) # 一旦リセットして再登録
+                conn.execute(text("DELETE FROM staff_master")) 
                 for _, row in valid_staff.iterrows():
                     conn.execute(text("""
                         INSERT INTO staff_master (staff_name, password, role_name, is_admin)
@@ -226,8 +294,8 @@ if st.session_state.user["is_admin"]:
             st.success("✅ スタッフ情報を更新しました！")
             st.rerun()
 
-    # 【タブ3】Excel出力
-    with tab3:
+    # 【タブ4】Excel出力
+    with tab4:
         st.write("現在のデータベースの状態をExcelとしてダウンロードします。")
         def create_excel_file():
             output = io.BytesIO()
@@ -266,6 +334,13 @@ if st.session_state.user["is_admin"]:
 else:
     st.title("📱 シフト希望提出")
     st.info(f"ログイン中のユーザー: **{st.session_state.user['name']}** さん")
+    
+    # DBから募集設定を読み込んで表示
+    p_start = get_config("period_start", "未設定")
+    p_end = get_config("period_end", "未設定")
+    p_deadline = get_config("deadline", "未設定")
+    
+    st.warning(f"**現在の募集期間:** {p_start} 〜 {p_end} 　🚨 **提出締切:** {p_deadline}")
     
     off_days = st.multiselect("お休み（OFF）希望の曜日を選んでください", days_of_week)
     
