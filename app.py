@@ -9,37 +9,36 @@ st.set_page_config(page_title="デバッグモード", layout="wide")
 @st.cache_resource
 def get_engine():
     try:
-        # 1. Secretsからデータを取得できるかチェック
-        if "database" not in st.secrets:
-            st.error("Secretsに [database] セクションが見つかりません。")
-            return None
+        # 1. 接続文字列をパースするのではなく、構成要素を直接指定する
+        # URIを直接書くのではなく、Secretsに各項目を分けて書くのが理想ですが、
+        # 今のURIから安全にパーツを抜き出します。
         
         raw_uri = st.secrets["database"]["uri"]
         
-        # 2. パスワードの特殊文字対策（@ や : をエンコード）
-        if "@" in raw_uri:
-            # プロトコル部分を分離
-            prefix, rest = raw_uri.split("://")
-            # ユーザー名:パスワード 部分と ホスト以降を分離
-            user_pass, host_info = rest.rsplit("@", 1)
-            if ":" in user_pass:
-                user, password = user_pass.split(":", 1)
-                safe_password = urllib.parse.quote_plus(password)
-                # 再構築
-                raw_uri = f"{prefix}://{user}:{safe_password}@{host_info}"
+        # URIから情報を抽出（手動パース）
+        # postgresql:// [user] : [pass] @ [host] : [port] / [db]
+        part1 = raw_uri.split("://")[1]
+        user_pass, host_db = part1.split("@")
+        user, password = user_pass.split(":", 1)
+        host_port, db_name_query = host_db.split("/")
+        host, port = host_port.split(":")
+        db_name = db_name_query.split("?")[0]
 
-        # 3. SQLAlchemy形式に補正
-        if raw_uri.startswith("postgresql://"):
-            raw_uri = raw_uri.replace("postgresql://", "postgresql+psycopg2://", 1)
+        # 2. SQLAlchemyのURLオブジェクトを作成（これが一番確実）
+        url_object = URL.create(
+            drivername="postgresql+psycopg2",
+            username=user,         # ここに postgres.pism... が確実に入る
+            password=password,     # 英字のみなのでそのまま
+            host=host,
+            port=int(port),
+            database=db_name,
+            query={"sslmode": "require"},
+        )
         
-        # 4. SSL設定を強制
-        if "?" not in raw_uri:
-            raw_uri += "?sslmode=require"
-        
-        return create_engine(raw_uri)
+        return create_engine(url_object)
         
     except Exception as e:
-        st.error(f"⚠️ 接続エンジンの作成に失敗しました: {e}")
+        st.error(f"接続設定の分解に失敗しました: {e}")
         return None
 
 # --- メイン処理 ---
