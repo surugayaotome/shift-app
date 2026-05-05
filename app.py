@@ -1,52 +1,44 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import URL  # 👈 これが足りませんでした！
+from sqlalchemy.engine import URL  # インポート忘れ修正
 import urllib.parse
 
-st.set_page_config(page_title="シフト管理システム", layout="wide")
+st.set_page_config(page_title="日本橋乙女 シフト管理", layout="wide")
 
-# --- データベース接続関数 ---
+# --- データベース接続設定 ---
 @st.cache_resource
 def get_engine():
     try:
-        if "database" not in st.secrets:
-            st.error("Secretsに [database] が設定されていません。")
-            return None
-        
+        # SecretsからURIを取得
         raw_uri = st.secrets["database"]["uri"]
         
-        # 1. URIをパーツに分解する（ドット入りのユーザー名を保護するため）
+        # 1. URIを自前で分解（ドット入りのユーザー名を保護）
         # postgresql:// [user] : [pass] @ [host] : [port] / [db]
         prefix, rest = raw_uri.split("://")
         user_pass, host_db = rest.rsplit("@", 1)
         user, password = user_pass.split(":", 1)
-        
         host_port, db_query = host_db.split("/", 1)
         host, port = host_port.split(":")
-        
         db_name = db_query.split("?")[0]
 
-        # 2. SQLAlchemyのURLオブジェクトを作成
-        # これを使うと、特殊文字やドットを適切に処理してくれます
+        # 2. パラメータを個別に指定してURLオブジェクトを作成（これが一番安全）
         url_object = URL.create(
             drivername="postgresql+psycopg2",
-            username=user,         # postgres.pism... がここに入ります
-            password=password,     # 英字のみ
+            username=user,
+            password=password,
             host=host,
             port=int(port),
             database=db_name,
             query={"sslmode": "require"},
         )
-        
         return create_engine(url_object)
-        
     except Exception as e:
-        st.error(f"⚠️ 接続設定の分解に失敗しました: {e}")
+        st.error(f"接続設定の読み込みエラー: {e}")
         return None
 
 # --- メイン処理 ---
-st.title("🚀 シフト管理システム：接続テスト")
+st.title("🚀 データベース接続テスト")
 
 engine = get_engine()
 
@@ -54,9 +46,9 @@ if engine:
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-            st.success("✅ ついにデータベース接続に成功しました！")
+            st.success("✅ ついにデータベースに接続できました！")
             
-            # テーブル作成
+            # テーブル作成（QA工程として自動化）
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS shift_data (
                     day TEXT,
@@ -67,8 +59,8 @@ if engine:
                 );
             """))
             conn.commit()
-            st.info("テーブルの準備も完了です。アプリのメイン機能を実装できます。")
+            st.info("テーブルの準備もOKです。ここからシフト管理のメイン機能を実装できます。")
             
     except Exception as e:
         st.error("⚠️ データベースとの通信に失敗しました。")
-        st.exception(e)  # 詳細なエラーを画面に出す
+        st.exception(e) # 詳細なエラー（認証失敗など）を画面に出す
