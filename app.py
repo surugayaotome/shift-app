@@ -179,7 +179,11 @@ if st.session_state.user["is_admin"]:
         end_of_week = start_of_week + datetime.timedelta(days=6)
         
         all_df = get_all_shift_data()
-        all_df['date_obj'] = pd.to_datetime(all_df['day']).dt.date
+        
+        # 🚨修正箇所： errors='coerce' を入れて古い「月」「火」データをエラーにせず無視(NaT)する
+        all_df['date_obj'] = pd.to_datetime(all_df['day'], errors='coerce').dt.date
+        all_df = all_df.dropna(subset=['date_obj']) # 変換できなかった古いゴミデータを除外
+        
         week_df = all_df[(all_df['date_obj'] >= start_of_week) & (all_df['date_obj'] <= end_of_week)]
         
         weekly_hours = {}
