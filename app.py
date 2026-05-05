@@ -167,9 +167,9 @@ if st.session_state.user["is_admin"]:
     st.title("👨‍💼 管理者ダッシュボード")
     tab1, tab2, tab3, tab4 = st.tabs(["📝 シフト編集", "📅 募集設定", "👥 スタッフ管理", "📊 Excel出力"])
     
-    # 【タブ1】究極のExcelライク・シフト編集
+    # 【タブ1】究極のExcelライク・シフト編集（オートセーブ版）
     with tab1:
-        st.write("### 📝 シフト編集（ExcelライクUI）")
+        st.write("### 📝 シフト編集（自動保存対応）")
         today = datetime.date.today()
         target_date = st.date_input("カレンダーから日付を選択", value=today)
         target_day_str = target_date.strftime("%Y-%m-%d")
@@ -263,31 +263,36 @@ if st.session_state.user["is_admin"]:
         }
         """)
 
-        # 🚨修正1：デフォルトの幅を「90」にし、見切れないようにする
-        gb.configure_default_column(editable=editable_js, width=90, cellStyle=cell_style_js, sortable=False)
+        # 🚨修正1: 見切れ防止設定 (suppressMenu=True で余計なアイコンを消し、wrapHeaderTextで長文字を折り返す)
+        gb.configure_default_column(
+            editable=editable_js, 
+            width=85, 
+            cellStyle=cell_style_js, 
+            sortable=False,
+            suppressMenu=True,        # メニューアイコン削除（見切れ防止）
+            wrapHeaderText=True,      # ヘッダーの折り返し
+            autoHeaderHeight=True     # ヘッダーの高さを自動調整
+        )
         
         # 固定列
-        gb.configure_column("氏名", editable=False, pinned="left", width=130, sortable=False)
-        gb.configure_column("週勤務", editable=False, pinned="left", width=90, sortable=False)
+        gb.configure_column("氏名", editable=False, pinned="left", width=120)
+        gb.configure_column("週勤務", editable=False, pinned="left", width=85)
         
-        # 🚨修正2：状態と時間の列に「プルダウンメニュー（agSelectCellEditor）」を強制適用
         gb.configure_column("状態", 
                             editable=editable_js, 
                             pinned="left", 
-                            width=100, 
+                            width=95, 
                             cellEditor='agSelectCellEditor', 
-                            cellEditorParams={'values': ["未提出", "提出済", "OFF"]},
-                            sortable=False)
+                            cellEditorParams={'values': ["未提出", "提出済", "OFF"]})
         
         for t in time_slots:
             gb.configure_column(t, 
                                 cellEditor='agSelectCellEditor', 
-                                cellEditorParams={'values': ["", "1", "2", "同", "休"]},
-                                sortable=False)
+                                cellEditorParams={'values': ["", "1", "2", "同", "休"]})
 
         # 計算列
-        gb.configure_column("勤務h", editable=False, valueGetter=work_calc_js, pinned="right", width=90, sortable=False)
-        gb.configure_column("休憩h", editable=False, valueGetter=break_calc_js, pinned="right", width=90, sortable=False)
+        gb.configure_column("勤務h", editable=False, valueGetter=work_calc_js, pinned="right", width=85)
+        gb.configure_column("休憩h", editable=False, valueGetter=break_calc_js, pinned="right", width=85)
 
         gb.configure_grid_options(
             enableRangeSelection=True, 
@@ -297,25 +302,43 @@ if st.session_state.user["is_admin"]:
             rowSelection='multiple'
         )
         
-        st.info("💡 【操作ガイド】セルをクリックするとプルダウンが出ます。方向キーで移動、範囲選択コピペも可能です。")
+        st.info("💡 【操作ガイド】自動保存対応です！ セルの変更やコピペは、数秒以内に裏でデータベースに保存されます。")
         
-        # 🚨修正3：テーマを「alpine」（綺麗で余白のあるモダンなExcelスタイル）に変更、高さを500に
+        # 🚨修正2: update_mode を VALUE_CHANGED（値が変わった瞬間）に変更
         response = AgGrid(
             df_to_edit,
             gridOptions=gb.build(),
             data_return_mode=DataReturnMode.AS_INPUT,
-            update_mode=GridUpdateMode.MODEL_CHANGED,
+            update_mode=GridUpdateMode.VALUE_CHANGED, # 値が変更されたら即座にPython側に送る
             fit_columns_on_grid_load=False,
             allow_unsafe_jscode=True, 
             theme='alpine', 
             height=500
         )
         
-        if st.button(f"💾 {target_day_str} のシフトを確定して保存", type="primary"):
-            edited_df = pd.DataFrame(response['data'])
-            save_day_data(target_day_str, edited_df)
-            st.success(f"✅ {target_day_str} のデータを保存しました！（合計ラインも再計算されました）")
-            st.rerun()
+        # 🚨修正3: 保存ボタンを撤廃し、変更検知によるオートセーブ機能を実装
+        edited_df = pd.DataFrame(response['data'])
+        if not edited_df.empty and not df_to_edit.empty:
+            changed = False
+            for s in staff_list:
+                edited_row = edited_df[edited_df["氏名"] == s]
+                orig_row = df_to_edit[df_to_edit["氏名"] == s]
+                if not edited_row.empty and not orig_row.empty:
+                    # 状態の変更検知
+                    if str(edited_row.iloc[0]["状態"]) != str(orig_row.iloc[0]["状態"]):
+                        changed = True
+                        break
+                    # 時間の変更検知
+                    for t in time_slots:
+                        if str(edited_row.iloc[0].get(t, "")) != str(orig_row.iloc[0].get(t, "")):
+                            changed = True
+                            break
+                if changed: break
+            
+            if changed:
+                save_day_data(target_day_str, edited_df)
+                st.toast(f"✅ 自動保存しました！（{datetime.datetime.now().strftime('%H:%M:%S')}）", icon="💾")
+                st.rerun() # 保存後、合計ラインの再計算のために画面をリフレッシュ
 
     # 【タブ2】募集設定
     with tab2:
