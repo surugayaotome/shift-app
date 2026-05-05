@@ -55,28 +55,59 @@ engine = get_engine()
 
 def init_db():
     if engine is None: return
+    
+    # 1つずつ独立した接続で実行し、エラーを他に波及させない
+    commands = [
+        """
+        CREATE TABLE IF NOT EXISTS shift_data (
+            day TEXT,
+            staff_name TEXT,
+            off_status TEXT,
+            shift_json TEXT,
+            PRIMARY KEY (day, staff_name)
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS staff_master (
+            staff_name TEXT PRIMARY KEY,
+            password TEXT NOT NULL,
+            role_name TEXT,
+            is_admin BOOLEAN DEFAULT FALSE
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS system_config (
+            config_key TEXT PRIMARY KEY,
+            config_value TEXT
+        );
+        """
+    ]
+
     with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS shift_data (
-                day TEXT,
-                staff_name TEXT,
-                off_status TEXT,
-                shift_json TEXT,
-                PRIMARY KEY (day, staff_name)
-            );
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS staff_master (
-                staff_name TEXT PRIMARY KEY,
-                password TEXT NOT NULL,
-                role_name TEXT,
-                is_admin BOOLEAN DEFAULT FALSE
-            );
-        """))
+        for cmd in commands:
+            try:
+                conn.execute(text(cmd))
+                conn.commit() # 1命令ごとに確定
+            except Exception:
+                pass # すでにテーブルがある場合などは無視
+
+        # staff_id の追加だけは ALTER なので個別にトライ
         try:
             conn.execute(text("ALTER TABLE staff_master ADD COLUMN staff_id TEXT;"))
             conn.commit()
-        except:
+        except Exception:
+            pass # すでにカラムがある場合は何もしない
+
+        # 初期店長データの投入
+        try:
+            result = conn.execute(text("SELECT COUNT(*) FROM staff_master")).scalar()
+            if result == 0:
+                conn.execute(text("""
+                    INSERT INTO staff_master (staff_name, password, role_name, is_admin, staff_id) 
+                    VALUES ('店長', 'admin1234', '全体統括', TRUE, '0000')
+                """))
+                conn.commit()
+        except Exception:
             pass
             
         conn.execute(text("""
