@@ -167,7 +167,7 @@ if st.session_state.user["is_admin"]:
     st.title("👨‍💼 管理者ダッシュボード")
     tab1, tab2, tab3, tab4 = st.tabs(["📝 シフト編集", "📅 募集設定", "👥 スタッフ管理", "📊 Excel出力"])
     
-    # 【タブ1】究極のExcelライク・シフト編集（ヘッダー結合版）
+    # 【タブ1】究極のExcelライク・シフト編集（極小・圧縮全体俯瞰版）
     with tab1:
         st.write("### 📝 シフト編集（自動保存対応）")
         today = datetime.date.today()
@@ -220,18 +220,23 @@ if st.session_state.user["is_admin"]:
         df_to_edit = pd.DataFrame(display_data)
 
         # ==========================================
-        # 🚨ここから：Excelと全く同じ「階層型ヘッダー」を直接定義
+        # 🚨ここから：全体を俯瞰するための極小・圧縮設定
         # ==========================================
         editable_js = JsCode("function(params) { return params.node.data['氏名'] !== '合計ライン'; }")
         
+        # フォントサイズを「11px」に固定し、余白を削って中央寄せ
         cell_style_js = JsCode("""
         function(params) {
             const v = params.value;
-            if (v === 'OFF' || v === '休' || v === '未提出') return {'backgroundColor': '#ffe6e6', 'color': '#cc0000', 'fontWeight': 'bold'};
-            if (v === '1' || v === '2' || v === '同') return {'backgroundColor': '#e6f0ff', 'color': '#0044cc'};
-            if (v === '提出済') return {'backgroundColor': '#e6ffe6', 'color': '#008000'};
-            if (params.node.data['氏名'] === '合計ライン') return {'backgroundColor': '#f0f0f0', 'fontWeight': 'bold', 'borderTop': '2px solid #ccc'};
-            return null;
+            let style = {'fontSize': '11px', 'textAlign': 'center', 'padding': '0px'};
+            if (params.colDef.field === '氏名') {
+                style['textAlign'] = 'left';
+            }
+            if (v === 'OFF' || v === '休' || v === '未提出') return Object.assign(style, {'backgroundColor': '#ffe6e6', 'color': '#cc0000', 'fontWeight': 'bold'});
+            if (v === '1' || v === '2' || v === '同') return Object.assign(style, {'backgroundColor': '#e6f0ff', 'color': '#0044cc'});
+            if (v === '提出済') return Object.assign(style, {'backgroundColor': '#e6ffe6', 'color': '#008000'});
+            if (params.node.data['氏名'] === '合計ライン') return Object.assign(style, {'backgroundColor': '#f0f0f0', 'fontWeight': 'bold', 'borderTop': '2px solid #ccc'});
+            return style;
         }
         """)
 
@@ -255,15 +260,15 @@ if st.session_state.user["is_admin"]:
         }
         """)
 
-        # 1. 左側の固定列（ピン留め）
+        # 1. 左側の固定列（幅を大幅に圧縮）
         left_cols = [
-            {"field": "氏名", "pinned": "left", "width": 110, "editable": False, "cellStyle": cell_style_js},
-            {"field": "週勤務", "pinned": "left", "width": 75, "editable": False, "cellStyle": cell_style_js},
-            {"field": "状態", "pinned": "left", "width": 85, "editable": editable_js, 
+            {"field": "氏名", "pinned": "left", "width": 85, "editable": False, "cellStyle": cell_style_js},
+            {"field": "週勤務", "pinned": "left", "width": 55, "editable": False, "cellStyle": cell_style_js},
+            {"field": "状態", "pinned": "left", "width": 65, "editable": editable_js, 
              "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["未提出", "提出済", "OFF"]}, "cellStyle": cell_style_js}
         ]
         
-        # 2. 時間の列（ここで「10時」の下に「00」「30」をぶら下げる階層化を実施！）
+        # 2. 時間の列（幅を「40」まで絞り、1画面に収める）
         time_cols = []
         for h in range(10, 18):
             children = []
@@ -271,38 +276,46 @@ if st.session_state.user["is_admin"]:
                 t = f"{h}:{m:02d}"
                 children.append({
                     "field": t,
-                    "headerName": f"{m:02d}", # 表示名のみ「00」「30」にする
-                    "width": 50, # 横スクロール前提で狭く（Excel風）
+                    "headerName": f"{m:02d}", 
+                    "width": 40, # プルダウンの矢印が入る限界の細さ
                     "editable": editable_js,
                     "cellEditor": 'agSelectCellEditor',
                     "cellEditorParams": {'values': ["", "1", "2", "同", "休"]},
                     "cellStyle": cell_style_js
                 })
-            # 親ヘッダー（10時など）に子ヘッダー（00, 30）を持たせる
             time_cols.append({
                 "headerName": f"{h}時",
                 "children": children
             })
             
-        # 3. 右側の計算列（ピン留め）
+        # 3. 右側の計算列（幅を圧縮）
         right_cols = [
-            {"field": "勤務h", "pinned": "right", "width": 75, "editable": False, "valueGetter": work_calc_js, "cellStyle": cell_style_js},
-            {"field": "休憩h", "pinned": "right", "width": 75, "editable": False, "valueGetter": break_calc_js, "cellStyle": cell_style_js}
+            {"field": "勤務h", "pinned": "right", "width": 55, "editable": False, "valueGetter": work_calc_js, "cellStyle": cell_style_js},
+            {"field": "休憩h", "pinned": "right", "width": 55, "editable": False, "valueGetter": break_calc_js, "cellStyle": cell_style_js}
         ]
 
-        # 4. 全体の設定を統合
+        # 4. 表全体の設定（行の高さも限界まで詰める）
         grid_options = {
             "columnDefs": left_cols + time_cols + right_cols,
             "defaultColDef": {
                 "sortable": False, 
-                "suppressMenu": True, # メニューアイコン削除（無駄な余白を消す）
+                "suppressMenu": True, 
                 "resizable": True
             },
             "enableRangeSelection": True,
             "suppressCopyRowsToClipboard": True,
             "enterMovesDownAfterEdit": True,
             "singleClickEdit": True,
-            "rowSelection": "multiple"
+            "rowSelection": "multiple",
+            "rowHeight": 24, # 行の高さをExcel並みに圧縮
+            "headerHeight": 26, # ヘッダーの高さを圧縮
+            "groupHeaderHeight": 26
+        }
+        
+        # 🚨 ヘッダーの文字も強制的に小さくするCSS
+        custom_css = {
+            ".ag-header-cell-text": {"font-size": "10px !important"},
+            ".ag-header-group-text": {"font-size": "11px !important", "font-weight": "bold !important"}
         }
         
         st.info("💡 【操作ガイド】自動保存対応です！ セルの変更やコピペは、数秒以内に裏でデータベースに保存されます。")
@@ -310,11 +323,12 @@ if st.session_state.user["is_admin"]:
         response = AgGrid(
             df_to_edit,
             gridOptions=grid_options,
+            custom_css=custom_css,
             data_return_mode=DataReturnMode.AS_INPUT,
             update_mode=GridUpdateMode.VALUE_CHANGED,
-            fit_columns_on_grid_load=False, # 画面幅に強制フィットさせず、横スクロールを許容！
+            fit_columns_on_grid_load=False, 
             allow_unsafe_jscode=True, 
-            theme='balham', # 高さがコンパクトで一番Excelに近いテーマに変更
+            theme='balham', # 高さが最も詰まるbalhamテーマを採用
             height=450
         )
         
