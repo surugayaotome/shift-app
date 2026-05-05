@@ -1,34 +1,38 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL  # 👈 これが足りませんでした！
 import urllib.parse
 
-st.set_page_config(page_title="デバッグモード", layout="wide")
+st.set_page_config(page_title="シフト管理システム", layout="wide")
 
-# --- データベース接続関数（エラー表示強化） ---
+# --- データベース接続関数 ---
 @st.cache_resource
 def get_engine():
     try:
-        # 1. 接続文字列をパースするのではなく、構成要素を直接指定する
-        # URIを直接書くのではなく、Secretsに各項目を分けて書くのが理想ですが、
-        # 今のURIから安全にパーツを抜き出します。
+        if "database" not in st.secrets:
+            st.error("Secretsに [database] が設定されていません。")
+            return None
         
         raw_uri = st.secrets["database"]["uri"]
         
-        # URIから情報を抽出（手動パース）
+        # 1. URIをパーツに分解する（ドット入りのユーザー名を保護するため）
         # postgresql:// [user] : [pass] @ [host] : [port] / [db]
-        part1 = raw_uri.split("://")[1]
-        user_pass, host_db = part1.split("@")
+        prefix, rest = raw_uri.split("://")
+        user_pass, host_db = rest.rsplit("@", 1)
         user, password = user_pass.split(":", 1)
-        host_port, db_name_query = host_db.split("/")
+        
+        host_port, db_query = host_db.split("/", 1)
         host, port = host_port.split(":")
-        db_name = db_name_query.split("?")[0]
+        
+        db_name = db_query.split("?")[0]
 
-        # 2. SQLAlchemyのURLオブジェクトを作成（これが一番確実）
+        # 2. SQLAlchemyのURLオブジェクトを作成
+        # これを使うと、特殊文字やドットを適切に処理してくれます
         url_object = URL.create(
             drivername="postgresql+psycopg2",
-            username=user,         # ここに postgres.pism... が確実に入る
-            password=password,     # 英字のみなのでそのまま
+            username=user,         # postgres.pism... がここに入ります
+            password=password,     # 英字のみ
             host=host,
             port=int(port),
             database=db_name,
@@ -38,22 +42,21 @@ def get_engine():
         return create_engine(url_object)
         
     except Exception as e:
-        st.error(f"接続設定の分解に失敗しました: {e}")
+        st.error(f"⚠️ 接続設定の分解に失敗しました: {e}")
         return None
 
 # --- メイン処理 ---
-st.title("🚀 シフト管理システム：接続テスト中")
+st.title("🚀 シフト管理システム：接続テスト")
 
 engine = get_engine()
 
 if engine:
     try:
-        # 実際にDBを叩いてみる
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-            st.success("✅ データベース接続に成功しました！")
+            st.success("✅ ついにデータベース接続に成功しました！")
             
-            # テーブル作成を試みる
+            # テーブル作成
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS shift_data (
                     day TEXT,
@@ -64,14 +67,8 @@ if engine:
                 );
             """))
             conn.commit()
-            st.info("テーブルの準備もOKです。")
+            st.info("テーブルの準備も完了です。アプリのメイン機能を実装できます。")
             
     except Exception as e:
-        # 🚨 ここで画面に生のエラーを表示させる
         st.error("⚠️ データベースとの通信に失敗しました。")
-        st.exception(e) # これで詳細なスタックトレースが画面に出ます
-else:
-    st.warning("エンジンが作成されていないため、接続テストをスキップしました。")
-
-st.write("---")
-st.write("もし赤いボックスの中に `password authentication failed` と出ていたら、パスワードが間違っています。")
+        st.exception(e)  # 詳細なエラーを画面に出す
