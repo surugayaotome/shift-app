@@ -24,6 +24,8 @@ div[data-testid="stButton"] button[kind="primary"] {
 @st.cache_resource
 def get_engine():
     try:
+        from sqlalchemy.pool import NullPool  # 👈 追加：プール管理用のライブラリ
+
         raw_uri = st.secrets["database"]["uri"]
         prefix, rest = raw_uri.split("://")
         user_pass, host_db = rest.rsplit("@", 1)
@@ -41,7 +43,10 @@ def get_engine():
             database=db_name,
             query={"sslmode": "require"},
         )
-        return create_engine(url_object)
+        
+        # 🚨 ここが真犯人対策！ SQLAlchemy側のプールを無効化する
+        return create_engine(url_object, poolclass=NullPool)
+        
     except Exception as e:
         st.error(f"接続設定エラー: {e}")
         return None
