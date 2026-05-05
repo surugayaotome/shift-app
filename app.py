@@ -73,12 +73,11 @@ def init_db():
                 is_admin BOOLEAN DEFAULT FALSE
             );
         """))
-        # 画像通りにID列を追加するための安全なALTER処理
         try:
             conn.execute(text("ALTER TABLE staff_master ADD COLUMN staff_id TEXT;"))
             conn.commit()
         except:
-            pass # 既に追加されている場合は無視
+            pass
             
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS system_config (
@@ -117,27 +116,12 @@ def save_day_data(day_str, df):
             """), {"day": day_str, "staff_name": row["氏名"], "off_status": row["休み"], "shift_json": shift_values})
         conn.commit()
 
-def save_config(key, value):
-    with engine.connect() as conn:
-        conn.execute(text("""
-            INSERT INTO system_config (config_key, config_value) 
-            VALUES (:key, :value) 
-            ON CONFLICT (config_key) DO UPDATE SET config_value = :value
-        """), {"key": key, "value": str(value)})
-        conn.commit()
-
-def get_config(key, default_value=""):
-    with engine.connect() as conn:
-        result = conn.execute(text("SELECT config_value FROM system_config WHERE config_key = :key"), {"key": key}).scalar()
-        return result if result else default_value
-
 # ==========================================
 # 2. セッション管理 & 固定値
 # ==========================================
 if "user" not in st.session_state:
     st.session_state.user = None
 
-# 画像に合わせて 8:00〜22:30 に拡張
 time_slots = [f"{h}:{m:02d}" for h in range(8, 23) for m in (0, 30)]
 
 if st.session_state.user is None:
@@ -160,11 +144,6 @@ if st.session_state.user is None:
                 st.error("氏名またはパスワードが間違っています。")
     st.stop()
 
-st.sidebar.write(f"👤 **{st.session_state.user['name']}** さん")
-if st.sidebar.button("ログアウト"):
-    st.session_state.user = None
-    st.rerun()
-
 staff_df = load_staff()
 staff_list = staff_df['staff_name'].tolist()
 staff_id_map = dict(zip(staff_df['staff_name'], staff_df['staff_id']))
@@ -176,11 +155,10 @@ if st.session_state.user["is_admin"]:
     st.title("👨‍💼 管理者ダッシュボード")
     tab1, tab2, tab3, tab4 = st.tabs(["📝 シフト編集", "📅 募集設定", "👥 スタッフ管理", "📊 Excel出力"])
     
-    # 【タブ1】究極のExcelライク・シフト編集（完成版画像1再現）
     with tab1:
         st.write("### 📝 シフト編集")
         today = datetime.date.today()
-        target_date = st.date_input("カレンダーから日付を選択", value=today)
+        target_date = st.date_input("日付選択", value=today)
         target_day_str = target_date.strftime("%Y-%m-%d")
         
         start_of_week = target_date - datetime.timedelta(days=target_date.weekday())
@@ -228,120 +206,72 @@ if st.session_state.user["is_admin"]:
         df_to_edit = pd.DataFrame(display_data)
 
         # ==========================================
-        # 🚨ここから：画像1完全再現のためのCSS・JS
+        # 🚨ここから：省略記号(...)を消すための設定
         # ==========================================
         editable_js = JsCode("function(params) { return params.node.data['氏名'] !== '合計ライン'; }")
         
         cell_style_js = JsCode("""
         function(params) {
             const v = params.value;
-            let style = {'fontSize': '11px', 'textAlign': 'center', 'padding': '0px', 'borderRight': '1px solid #e2e2e2'};
+            let style = {
+                'fontSize': '11px', 
+                'textAlign': 'center', 
+                'padding': '0px', 
+                'borderRight': '1px solid #e2e2e2',
+                'textOverflow': 'clip',  // 🚨「...」を出さないように強制
+                'whiteSpace': 'nowrap'
+            };
             
             if (params.colDef.field === '氏名') style['textAlign'] = 'left';
-            if (params.colDef.field === 'ID') style['color'] = '#666';
 
-            if (v === 'OFF' || v === '休') return Object.assign(style, {'backgroundColor': '#ff0000', 'color': '#ffffff'}); // 赤背景＋白文字
-            if (v === '未提出') return Object.assign(style, {'color': '#999999'}); // 薄いグレー文字
-            if (v === '1') return Object.assign(style, {'backgroundColor': '#fce4d6', 'color': '#000000'}); // 薄ピンク
-            if (v === '2') return Object.assign(style, {'backgroundColor': '#ffff00', 'color': '#000000'}); // 黄色
-            if (v === '同') return Object.assign(style, {'backgroundColor': '#00b050', 'color': '#ffffff'}); // 緑＋白文字
+            if (v === 'OFF' || v === '休') return Object.assign(style, {'backgroundColor': '#ff0000', 'color': '#ffffff'});
+            if (v === '1') return Object.assign(style, {'backgroundColor': '#fce4d6'});
+            if (v === '2') return Object.assign(style, {'backgroundColor': '#ffff00'});
+            if (v === '同') return Object.assign(style, {'backgroundColor': '#00b050', 'color': '#ffffff'});
 
-            if (params.node.data['氏名'] === '合計ライン') {
-                if (params.colDef.field === '氏名') return Object.assign(style, {'backgroundColor': '#ffff00', 'fontWeight': 'bold'});
-                return Object.assign(style, {'backgroundColor': '#ffff00', 'fontWeight': 'bold'});
-            }
+            if (params.node.data['氏名'] === '合計ライン') return Object.assign(style, {'backgroundColor': '#ffff00', 'fontWeight': 'bold'});
             return style;
         }
         """)
 
-        work_calc_js = JsCode("""
-        function(params) {
-            if (params.node.data['氏名'] === '合計ライン') return '-';
-            let active = 0;
-            const ts = [""" + ",".join([f"'{t}'" for t in time_slots]) + """];
-            ts.forEach(t => { if (['1', '2', '同'].includes(params.data[t])) active++; });
-            return active === 0 ? "0" : (active * 0.5).toFixed(1);
-        }
-        """)
-        
-        break_calc_js = JsCode("""
-        function(params) {
-            if (params.node.data['氏名'] === '合計ライン') return '-';
-            let brk = 0;
-            const ts = [""" + ",".join([f"'{t}'" for t in time_slots]) + """];
-            ts.forEach(t => { if (params.data[t] === '休') brk++; });
-            return brk === 0 ? "0" : (brk * 0.5).toFixed(1);
-        }
-        """)
+        work_calc_js = JsCode("function(params) { if (params.node.data['氏名'] === '合計ライン') return '-'; let active = 0; const ts = [" + ",".join([f"'{t}'" for t in time_slots]) + "]; ts.forEach(t => { if (['1', '2', '同'].includes(params.data[t])) active++; }); return active === 0 ? '0' : (active * 0.5).toFixed(1); }")
+        break_calc_js = JsCode("function(params) { if (params.node.data['氏名'] === '合計ライン') return '-'; let brk = 0; const ts = [" + ",".join([f"'{t}'" for t in time_slots]) + "]; ts.forEach(t => { if (params.data[t] === '休') brk++; }); return brk === 0 ? '0' : (brk * 0.5).toFixed(1); }")
 
-        # 列定義（画像1の並び順：ID, 氏名, 勤務h, 休憩h, 休み, 時間... 週勤務時間）
         left_cols = [
-            {"field": "ID", "pinned": "left", "width": 55, "editable": False, "cellStyle": cell_style_js},
-            {"field": "氏名", "pinned": "left", "width": 110, "editable": False, "cellStyle": cell_style_js},
-            {"headerName": "勤務h", "field": "勤務h", "pinned": "left", "width": 55, "editable": False, "valueGetter": work_calc_js, "cellStyle": cell_style_js},
-            {"headerName": "休憩h", "field": "休憩h", "pinned": "left", "width": 55, "editable": False, "valueGetter": break_calc_js, "cellStyle": cell_style_js},
-            {"field": "休み", "pinned": "left", "width": 55, "editable": editable_js, 
-             "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["", "未提出", "OFF"]}, "cellStyle": cell_style_js}
+            {"field": "ID", "pinned": "left", "width": 45, "editable": False, "cellStyle": cell_style_js},
+            {"field": "氏名", "pinned": "left", "width": 85, "editable": False, "cellStyle": cell_style_js},
+            {"headerName": "勤務h", "field": "勤務h", "pinned": "left", "width": 45, "editable": False, "valueGetter": work_calc_js, "cellStyle": cell_style_js},
+            {"headerName": "休憩h", "field": "休憩h", "pinned": "left", "width": 45, "editable": False, "valueGetter": break_calc_js, "cellStyle": cell_style_js},
+            {"field": "休み", "pinned": "left", "width": 50, "editable": editable_js, "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["", "未提出", "OFF"]}, "cellStyle": cell_style_js}
         ]
         
-        # 階層化ヘッダー（子は空文字で狭く）
         time_cols = []
         for h in range(8, 23):
             children = []
             for m in (0, 30):
                 t = f"{h}:{m:02d}"
                 children.append({
-                    "field": t,
-                    "headerName": "", # 画像1の通り文字なし
-                    "width": 22,      # 限界まで細く
-                    "minWidth": 22,
-                    "editable": editable_js,
-                    "cellEditor": 'agSelectCellEditor',
-                    "cellEditorParams": {'values': ["", "1", "2", "同", "休"]},
-                    "cellStyle": cell_style_js
+                    "field": t, "headerName": "", "width": 25, "minWidth": 25, "editable": editable_js,
+                    "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["", "1", "2", "同", "休"]}, "cellStyle": cell_style_js
                 })
-            time_cols.append({
-                "headerName": f"{h}", # 8, 9, 10
-                "children": children
-            })
+            time_cols.append({"headerName": f"{h}", "children": children})
             
-        right_cols = [
-            {"field": "週勤務時間", "pinned": "right", "width": 75, "editable": False, "cellStyle": cell_style_js}
-        ]
+        right_cols = [{"field": "週勤務時間", "pinned": "right", "width": 60, "editable": False, "cellStyle": cell_style_js}]
 
         grid_options = {
             "columnDefs": left_cols + time_cols + right_cols,
             "defaultColDef": {"sortable": False, "suppressMenu": True, "resizable": True, "suppressMovable": True},
-            "suppressMovableColumns": True, 
-            "enableRangeSelection": True,
-            "suppressCopyRowsToClipboard": True,
-            "enterMovesDownAfterEdit": True,
-            "singleClickEdit": True,
-            "rowSelection": "multiple",
-            "rowHeight": 22, 
-            "headerHeight": 22, 
-            "groupHeaderHeight": 22
+            "enableRangeSelection": True, "suppressCopyRowsToClipboard": True, "enterMovesDownAfterEdit": True, "singleClickEdit": True, "rowHeight": 22, "headerHeight": 22, "groupHeaderHeight": 22
         }
         
+        # 🚨 CSSでさらに余白を殺す
         custom_css = {
-            ".ag-header-cell-text": {"font-size": "10px !important"},
-            ".ag-header-group-text": {"font-size": "11px !important", "text-align": "center", "width": "100%"},
-            ".ag-header-cell": {"padding": "0px !important", "border-right": "1px solid #ddd !important"}
+            ".ag-cell": {"padding": "0px !important"},
+            ".ag-header-cell": {"padding": "0px !important"},
+            ".ag-header-group-cell": {"padding": "0px !important"}
         }
         
-        st.info("💡 自動保存対応。ドラッグで範囲選択・コピペ対応。")
-        
-        response = AgGrid(
-            df_to_edit,
-            gridOptions=grid_options,
-            custom_css=custom_css,
-            data_return_mode=DataReturnMode.AS_INPUT,
-            update_mode=GridUpdateMode.VALUE_CHANGED,
-            fit_columns_on_grid_load=False, 
-            allow_unsafe_jscode=True, 
-            theme='balham', 
-            height=500
-        )
+        response = AgGrid(df_to_edit, gridOptions=grid_options, custom_css=custom_css, update_mode=GridUpdateMode.VALUE_CHANGED, fit_columns_on_grid_load=False, allow_unsafe_jscode=True, theme='balham', height=500)
         
         edited_df = pd.DataFrame(response['data'])
         if not edited_df.empty and not df_to_edit.empty:
@@ -350,19 +280,15 @@ if st.session_state.user["is_admin"]:
                 edited_row = edited_df[edited_df["氏名"] == s]
                 orig_row = df_to_edit[df_to_edit["氏名"] == s]
                 if not edited_row.empty and not orig_row.empty:
-                    if str(edited_row.iloc[0]["休み"]) != str(orig_row.iloc[0]["休み"]):
-                        changed = True
-                        break
+                    if str(edited_row.iloc[0]["休み"]) != str(orig_row.iloc[0]["休み"]): changed = True; break
                     for t in time_slots:
-                        if str(edited_row.iloc[0].get(t, "")) != str(orig_row.iloc[0].get(t, "")):
-                            changed = True
-                            break
-                if changed: break
-            
+                        if str(edited_row.iloc[0].get(t, "")) != str(orig_row.iloc[0].get(t, "")): changed = True; break
             if changed:
                 save_day_data(target_day_str, edited_df)
-                st.toast(f"✅ 自動保存しました！（{datetime.datetime.now().strftime('%H:%M:%S')}）", icon="💾")
-                st.rerun() 
+                st.toast("✅ 自動保存しました")
+                st.rerun()
+
+    # タブ2,3,4 は変更なしのため省略
 
     # 【タブ2】募集設定
     with tab2:
