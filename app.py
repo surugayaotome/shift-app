@@ -219,7 +219,7 @@ if st.session_state.user["is_admin"]:
         df_to_edit = pd.DataFrame(display_data)
 
         # ==========================================
-        # 🚨ここから：全体俯瞰 ＆ 【列移動ロック追加】設定
+        # 🚨ここから：見切れ対応のための微調整
         # ==========================================
         editable_js = JsCode("function(params) { return params.node.data['氏名'] !== '合計ライン'; }")
         
@@ -258,10 +258,11 @@ if st.session_state.user["is_admin"]:
         }
         """)
 
+        # 🚨修正：幅を広げて見切れないように調整
         left_cols = [
-            {"field": "氏名", "pinned": "left", "width": 85, "editable": False, "cellStyle": cell_style_js},
-            {"field": "週勤務", "pinned": "left", "width": 55, "editable": False, "cellStyle": cell_style_js},
-            {"field": "状態", "pinned": "left", "width": 65, "editable": editable_js, 
+            {"field": "氏名", "pinned": "left", "width": 90, "editable": False, "cellStyle": cell_style_js},
+            {"field": "週勤務", "pinned": "left", "width": 70, "editable": False, "cellStyle": cell_style_js},
+            {"field": "状態", "pinned": "left", "width": 75, "editable": editable_js, 
              "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["未提出", "提出済", "OFF"]}, "cellStyle": cell_style_js}
         ]
         
@@ -284,21 +285,21 @@ if st.session_state.user["is_admin"]:
                 "children": children
             })
             
+        # 🚨修正：幅を広げて見切れないように調整
         right_cols = [
-            {"field": "勤務h", "pinned": "right", "width": 55, "editable": False, "valueGetter": work_calc_js, "cellStyle": cell_style_js},
-            {"field": "休憩h", "pinned": "right", "width": 55, "editable": False, "valueGetter": break_calc_js, "cellStyle": cell_style_js}
+            {"field": "勤務h", "pinned": "right", "width": 65, "editable": False, "valueGetter": work_calc_js, "cellStyle": cell_style_js},
+            {"field": "休憩h", "pinned": "right", "width": 65, "editable": False, "valueGetter": break_calc_js, "cellStyle": cell_style_js}
         ]
 
-        # 🚨修正：表全体の設定に suppressMovableColumns と defaultColDef の suppressMovable を追加
         grid_options = {
             "columnDefs": left_cols + time_cols + right_cols,
             "defaultColDef": {
                 "sortable": False, 
                 "suppressMenu": True, 
                 "resizable": True,
-                "suppressMovable": True  # 列ごとの移動を禁止
+                "suppressMovable": True
             },
-            "suppressMovableColumns": True, # 表全体の列ドラッグ移動を完全禁止
+            "suppressMovableColumns": True, 
             "enableRangeSelection": True,
             "suppressCopyRowsToClipboard": True,
             "enterMovesDownAfterEdit": True,
