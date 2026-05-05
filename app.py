@@ -102,7 +102,7 @@ def save_day_data(day_str, df):
     with engine.connect() as conn:
         conn.execute(text(f"DELETE FROM shift_data WHERE day = '{day_str}'"))
         for _, row in df.iterrows():
-            if row["氏名"] == "合計ライン": continue # 合計行は保存しない
+            if row["氏名"] == "合計ライン": continue 
             shift_values = ",".join([str(row.get(t, "")) for t in time_slots])
             conn.execute(text("""
                 INSERT INTO shift_data (day, staff_name, off_status, shift_json)
@@ -174,21 +174,15 @@ if st.session_state.user["is_admin"]:
         target_date = st.date_input("カレンダーから日付を選択", value=today)
         target_day_str = target_date.strftime("%Y-%m-%d")
         
-        # 1. その週の「週勤務時間」を計算
+        # 1. その週の「週勤務時間」を計算（型エラー・ゴミデータ対策済み）
         start_of_week = target_date - datetime.timedelta(days=target_date.weekday())
         end_of_week = start_of_week + datetime.timedelta(days=6)
-        
-        # 🚨ここを追加：比較のためにPandas専用の型（Timestamp）に揃える
         pd_start = pd.to_datetime(start_of_week)
         pd_end = pd.to_datetime(end_of_week)
         
         all_df = get_all_shift_data()
-        
-        # .dt.date を外し、そのまま日時型(datetime64)として保持する
         all_df['date_obj'] = pd.to_datetime(all_df['day'], errors='coerce')
         all_df = all_df.dropna(subset=['date_obj'])
-        
-        # 型を揃えた pd_start と pd_end で比較！
         week_df = all_df[(all_df['date_obj'] >= pd_start) & (all_df['date_obj'] <= pd_end)]
         
         weekly_hours = {}
@@ -220,7 +214,7 @@ if st.session_state.user["is_admin"]:
                 row = {"氏名": s, "週勤務": f"{weekly_hours[s]:.1f}h", "状態": "未提出", **{t: "" for t in time_slots}}
             display_data.append(row)
         
-        # 合計ライン（ボトム行）の追加
+        # 合計ライン（ボトム行）
         total_row = {"氏名": "合計ライン", "週勤務": "-", "状態": "-"}
         for t in time_slots:
             total_row[t] = str(total_counts[t])
@@ -231,10 +225,8 @@ if st.session_state.user["is_admin"]:
         # 3. AgGrid（Excel UI）の設定
         gb = GridOptionsBuilder.from_dataframe(df_to_edit)
         
-        # 「合計ライン」行は編集不可にする賢いJSコード
         editable_js = JsCode("function(params) { return params.node.data['氏名'] !== '合計ライン'; }")
         
-        # 色付けのJSコード（リアルタイム反映）
         cell_style_js = JsCode("""
         function(params) {
             const v = params.value;
@@ -254,7 +246,6 @@ if st.session_state.user["is_admin"]:
         }
         """)
 
-        # リアルタイム計算用のJSコード（勤務h, 休憩h）
         work_calc_js = JsCode("""
         function(params) {
             if (params.node.data['氏名'] === '合計ライン') return '-';
@@ -275,48 +266,45 @@ if st.session_state.user["is_admin"]:
         }
         """)
 
-        # 列の基本設定
-        gb.configure_default_column(editable=editable_js, width=55, cellStyle=cell_style_js)
+        # 🚨修正箇所：幅を「75」に拡大 ＆ ソート機能を「完全禁止（sortable=False）」に設定
+        gb.configure_default_column(editable=editable_js, width=75, cellStyle=cell_style_js, sortable=False)
         
-        # 左側の固定列（ピン留め）
-        gb.configure_column("氏名", editable=False, pinned="left", width=100)
-        gb.configure_column("週勤務", editable=False, pinned="left", width=75)
-        gb.configure_column("状態", editable=editable_js, pinned="left", width=75)
+        # 🚨固定列の幅も、文字が見切れないよう余裕を持たせて設定
+        gb.configure_column("氏名", editable=False, pinned="left", width=120, sortable=False)
+        gb.configure_column("週勤務", editable=False, pinned="left", width=85, sortable=False)
+        gb.configure_column("状態", editable=editable_js, pinned="left", width=95, sortable=False)
         
-        # 右側の自動計算列（ピン留め）
-        gb.configure_column("勤務h", editable=False, valueGetter=work_calc_js, pinned="right", width=70)
-        gb.configure_column("休憩h", editable=False, valueGetter=break_calc_js, pinned="right", width=70)
+        gb.configure_column("勤務h", editable=False, valueGetter=work_calc_js, pinned="right", width=80, sortable=False)
+        gb.configure_column("休憩h", editable=False, valueGetter=break_calc_js, pinned="right", width=80, sortable=False)
 
-        # Excel機能の有効化
         gb.configure_grid_options(
-            enableRangeSelection=True, # ドラッグで範囲選択（Excel同様）
-            suppressCopyRowsToClipboard=True, # セル単位のコピー許可
-            enterMovesDownAfterEdit=True, # Enterで下に移動
-            singleClickEdit=True # 1クリックで即編集状態へ
+            enableRangeSelection=True, 
+            suppressCopyRowsToClipboard=True, 
+            enterMovesDownAfterEdit=True, 
+            singleClickEdit=True,
+            rowSelection='multiple' # 複数行選択をよりスムーズに
         )
         
         st.info("💡 【操作ガイド】方向キーで移動、Enterで入力。ドラッグして範囲選択（コピー＆ペースト対応）")
         
-        # 表の描画
         response = AgGrid(
             df_to_edit,
             gridOptions=gb.build(),
             data_return_mode=DataReturnMode.AS_INPUT,
             update_mode=GridUpdateMode.MODEL_CHANGED,
-            fit_columns_on_grid_load=False,
-            allow_unsafe_jscode=True, # 必須（色付けや計算に必要）
-            theme='balham', # Excelに一番近いコンパクトなテーマ
+            fit_columns_on_grid_load=False, # 列幅を画面に無理やり合わせない（はみ出した分は横スクロールさせる）
+            allow_unsafe_jscode=True, 
+            theme='balham', 
             height=450
         )
         
         if st.button(f"💾 {target_day_str} のシフトを確定して保存", type="primary"):
-            # 編集後のデータを取得して保存（合計ラインは関数内で弾かれます）
             edited_df = pd.DataFrame(response['data'])
             save_day_data(target_day_str, edited_df)
             st.success(f"✅ {target_day_str} のデータを保存しました！（合計ラインも再計算されました）")
             st.rerun()
 
-    # 【タブ2,3,4】（これ以降は前回と同じため省略せずに記述します）
+    # 【タブ2】募集設定
     with tab2:
         st.write("従業員画面に表示するシフト提出の対象期間を設定します。")
         col1, col2 = st.columns(2)
@@ -332,6 +320,7 @@ if st.session_state.user["is_admin"]:
                 save_config("deadline", deadline.strftime("%Y-%m-%d"))
                 st.success("✅ 募集設定を更新しました！")
 
+    # 【タブ3】スタッフ管理
     with tab3:
         st.write("#### 📁 CSVで一括インポート")
         @st.cache_data
@@ -380,6 +369,7 @@ if st.session_state.user["is_admin"]:
             st.success("✅ 更新完了！")
             st.rerun()
 
+    # 【タブ4】Excel出力
     with tab4:
         st.write("指定した期間のシフトをExcelとしてダウンロードします。")
         ex_start = st.date_input("開始日", value=today)
