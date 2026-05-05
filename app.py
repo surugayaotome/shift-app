@@ -174,7 +174,6 @@ if st.session_state.user["is_admin"]:
         target_date = st.date_input("カレンダーから日付を選択", value=today)
         target_day_str = target_date.strftime("%Y-%m-%d")
         
-        # 1. その週の「週勤務時間」を計算（型エラー・ゴミデータ対策済み）
         start_of_week = target_date - datetime.timedelta(days=target_date.weekday())
         end_of_week = start_of_week + datetime.timedelta(days=6)
         pd_start = pd.to_datetime(start_of_week)
@@ -194,7 +193,6 @@ if st.session_state.user["is_admin"]:
                 h_count += sum([1 for slot in slots if slot in ['1', '2', '同']])
             weekly_hours[s] = h_count * 0.5
 
-        # 2. 今日のデータを構築
         raw_df = load_day_data(target_day_str)
         display_data = []
         total_counts = {t: 0 for t in time_slots}
@@ -214,7 +212,6 @@ if st.session_state.user["is_admin"]:
                 row = {"氏名": s, "週勤務": f"{weekly_hours[s]:.1f}h", "状態": "未提出", **{t: "" for t in time_slots}}
             display_data.append(row)
         
-        # 合計ライン（ボトム行）
         total_row = {"氏名": "合計ライン", "週勤務": "-", "状態": "-"}
         for t in time_slots:
             total_row[t] = str(total_counts[t])
@@ -222,7 +219,7 @@ if st.session_state.user["is_admin"]:
         
         df_to_edit = pd.DataFrame(display_data)
 
-        # 3. AgGrid（Excel UI）の設定
+        # --- AgGrid（Excel UI）の設定 ---
         gb = GridOptionsBuilder.from_dataframe(df_to_edit)
         
         editable_js = JsCode("function(params) { return params.node.data['氏名'] !== '合計ライン'; }")
@@ -266,36 +263,52 @@ if st.session_state.user["is_admin"]:
         }
         """)
 
-        # 🚨修正箇所：幅を「75」に拡大 ＆ ソート機能を「完全禁止（sortable=False）」に設定
-        gb.configure_default_column(editable=editable_js, width=75, cellStyle=cell_style_js, sortable=False)
+        # 🚨修正1：デフォルトの幅を「90」にし、見切れないようにする
+        gb.configure_default_column(editable=editable_js, width=90, cellStyle=cell_style_js, sortable=False)
         
-        # 🚨固定列の幅も、文字が見切れないよう余裕を持たせて設定
-        gb.configure_column("氏名", editable=False, pinned="left", width=120, sortable=False)
-        gb.configure_column("週勤務", editable=False, pinned="left", width=85, sortable=False)
-        gb.configure_column("状態", editable=editable_js, pinned="left", width=95, sortable=False)
+        # 固定列
+        gb.configure_column("氏名", editable=False, pinned="left", width=130, sortable=False)
+        gb.configure_column("週勤務", editable=False, pinned="left", width=90, sortable=False)
         
-        gb.configure_column("勤務h", editable=False, valueGetter=work_calc_js, pinned="right", width=80, sortable=False)
-        gb.configure_column("休憩h", editable=False, valueGetter=break_calc_js, pinned="right", width=80, sortable=False)
+        # 🚨修正2：状態と時間の列に「プルダウンメニュー（agSelectCellEditor）」を強制適用
+        gb.configure_column("状態", 
+                            editable=editable_js, 
+                            pinned="left", 
+                            width=100, 
+                            cellEditor='agSelectCellEditor', 
+                            cellEditorParams={'values': ["未提出", "提出済", "OFF"]},
+                            sortable=False)
+        
+        for t in time_slots:
+            gb.configure_column(t, 
+                                cellEditor='agSelectCellEditor', 
+                                cellEditorParams={'values': ["", "1", "2", "同", "休"]},
+                                sortable=False)
+
+        # 計算列
+        gb.configure_column("勤務h", editable=False, valueGetter=work_calc_js, pinned="right", width=90, sortable=False)
+        gb.configure_column("休憩h", editable=False, valueGetter=break_calc_js, pinned="right", width=90, sortable=False)
 
         gb.configure_grid_options(
             enableRangeSelection=True, 
             suppressCopyRowsToClipboard=True, 
             enterMovesDownAfterEdit=True, 
             singleClickEdit=True,
-            rowSelection='multiple' # 複数行選択をよりスムーズに
+            rowSelection='multiple'
         )
         
-        st.info("💡 【操作ガイド】方向キーで移動、Enterで入力。ドラッグして範囲選択（コピー＆ペースト対応）")
+        st.info("💡 【操作ガイド】セルをクリックするとプルダウンが出ます。方向キーで移動、範囲選択コピペも可能です。")
         
+        # 🚨修正3：テーマを「alpine」（綺麗で余白のあるモダンなExcelスタイル）に変更、高さを500に
         response = AgGrid(
             df_to_edit,
             gridOptions=gb.build(),
             data_return_mode=DataReturnMode.AS_INPUT,
             update_mode=GridUpdateMode.MODEL_CHANGED,
-            fit_columns_on_grid_load=False, # 列幅を画面に無理やり合わせない（はみ出した分は横スクロールさせる）
+            fit_columns_on_grid_load=False,
             allow_unsafe_jscode=True, 
-            theme='balham', 
-            height=450
+            theme='alpine', 
+            height=500
         )
         
         if st.button(f"💾 {target_day_str} のシフトを確定して保存", type="primary"):
