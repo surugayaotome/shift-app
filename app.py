@@ -167,7 +167,7 @@ if st.session_state.user["is_admin"]:
     st.title("👨‍💼 管理者ダッシュボード")
     tab1, tab2, tab3, tab4 = st.tabs(["📝 シフト編集", "📅 募集設定", "👥 スタッフ管理", "📊 Excel出力"])
     
-    # 【タブ1】究極のExcelライク・シフト編集（オートセーブ版）
+    # 【タブ1】究極のExcelライク・シフト編集（ヘッダー結合版）
     with tab1:
         st.write("### 📝 シフト編集（自動保存対応）")
         today = datetime.date.today()
@@ -219,26 +219,18 @@ if st.session_state.user["is_admin"]:
         
         df_to_edit = pd.DataFrame(display_data)
 
-        # --- AgGrid（Excel UI）の設定 ---
-        gb = GridOptionsBuilder.from_dataframe(df_to_edit)
-        
+        # ==========================================
+        # 🚨ここから：Excelと全く同じ「階層型ヘッダー」を直接定義
+        # ==========================================
         editable_js = JsCode("function(params) { return params.node.data['氏名'] !== '合計ライン'; }")
         
         cell_style_js = JsCode("""
         function(params) {
             const v = params.value;
-            if (v === 'OFF' || v === '休' || v === '未提出') {
-                return {'backgroundColor': '#ffe6e6', 'color': '#cc0000', 'fontWeight': 'bold'};
-            }
-            if (v === '1' || v === '2' || v === '同') {
-                return {'backgroundColor': '#e6f0ff', 'color': '#0044cc'};
-            }
-            if (v === '提出済') {
-                return {'backgroundColor': '#e6ffe6', 'color': '#008000'};
-            }
-            if (params.node.data['氏名'] === '合計ライン') {
-                return {'backgroundColor': '#f0f0f0', 'fontWeight': 'bold', 'borderTop': '2px solid #ccc'};
-            }
+            if (v === 'OFF' || v === '休' || v === '未提出') return {'backgroundColor': '#ffe6e6', 'color': '#cc0000', 'fontWeight': 'bold'};
+            if (v === '1' || v === '2' || v === '同') return {'backgroundColor': '#e6f0ff', 'color': '#0044cc'};
+            if (v === '提出済') return {'backgroundColor': '#e6ffe6', 'color': '#008000'};
+            if (params.node.data['氏名'] === '合計ライン') return {'backgroundColor': '#f0f0f0', 'fontWeight': 'bold', 'borderTop': '2px solid #ccc'};
             return null;
         }
         """)
@@ -263,60 +255,69 @@ if st.session_state.user["is_admin"]:
         }
         """)
 
-        # 🚨修正1: 見切れ防止設定 (suppressMenu=True で余計なアイコンを消し、wrapHeaderTextで長文字を折り返す)
-        gb.configure_default_column(
-            editable=editable_js, 
-            width=85, 
-            cellStyle=cell_style_js, 
-            sortable=False,
-            suppressMenu=True,        # メニューアイコン削除（見切れ防止）
-            wrapHeaderText=True,      # ヘッダーの折り返し
-            autoHeaderHeight=True     # ヘッダーの高さを自動調整
-        )
+        # 1. 左側の固定列（ピン留め）
+        left_cols = [
+            {"field": "氏名", "pinned": "left", "width": 110, "editable": False, "cellStyle": cell_style_js},
+            {"field": "週勤務", "pinned": "left", "width": 75, "editable": False, "cellStyle": cell_style_js},
+            {"field": "状態", "pinned": "left", "width": 85, "editable": editable_js, 
+             "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["未提出", "提出済", "OFF"]}, "cellStyle": cell_style_js}
+        ]
         
-        # 固定列
-        gb.configure_column("氏名", editable=False, pinned="left", width=120)
-        gb.configure_column("週勤務", editable=False, pinned="left", width=85)
-        
-        gb.configure_column("状態", 
-                            editable=editable_js, 
-                            pinned="left", 
-                            width=95, 
-                            cellEditor='agSelectCellEditor', 
-                            cellEditorParams={'values': ["未提出", "提出済", "OFF"]})
-        
-        for t in time_slots:
-            gb.configure_column(t, 
-                                cellEditor='agSelectCellEditor', 
-                                cellEditorParams={'values': ["", "1", "2", "同", "休"]})
+        # 2. 時間の列（ここで「10時」の下に「00」「30」をぶら下げる階層化を実施！）
+        time_cols = []
+        for h in range(10, 18):
+            children = []
+            for m in (0, 30):
+                t = f"{h}:{m:02d}"
+                children.append({
+                    "field": t,
+                    "headerName": f"{m:02d}", # 表示名のみ「00」「30」にする
+                    "width": 50, # 横スクロール前提で狭く（Excel風）
+                    "editable": editable_js,
+                    "cellEditor": 'agSelectCellEditor',
+                    "cellEditorParams": {'values': ["", "1", "2", "同", "休"]},
+                    "cellStyle": cell_style_js
+                })
+            # 親ヘッダー（10時など）に子ヘッダー（00, 30）を持たせる
+            time_cols.append({
+                "headerName": f"{h}時",
+                "children": children
+            })
+            
+        # 3. 右側の計算列（ピン留め）
+        right_cols = [
+            {"field": "勤務h", "pinned": "right", "width": 75, "editable": False, "valueGetter": work_calc_js, "cellStyle": cell_style_js},
+            {"field": "休憩h", "pinned": "right", "width": 75, "editable": False, "valueGetter": break_calc_js, "cellStyle": cell_style_js}
+        ]
 
-        # 計算列
-        gb.configure_column("勤務h", editable=False, valueGetter=work_calc_js, pinned="right", width=85)
-        gb.configure_column("休憩h", editable=False, valueGetter=break_calc_js, pinned="right", width=85)
-
-        gb.configure_grid_options(
-            enableRangeSelection=True, 
-            suppressCopyRowsToClipboard=True, 
-            enterMovesDownAfterEdit=True, 
-            singleClickEdit=True,
-            rowSelection='multiple'
-        )
+        # 4. 全体の設定を統合
+        grid_options = {
+            "columnDefs": left_cols + time_cols + right_cols,
+            "defaultColDef": {
+                "sortable": False, 
+                "suppressMenu": True, # メニューアイコン削除（無駄な余白を消す）
+                "resizable": True
+            },
+            "enableRangeSelection": True,
+            "suppressCopyRowsToClipboard": True,
+            "enterMovesDownAfterEdit": True,
+            "singleClickEdit": True,
+            "rowSelection": "multiple"
+        }
         
         st.info("💡 【操作ガイド】自動保存対応です！ セルの変更やコピペは、数秒以内に裏でデータベースに保存されます。")
         
-        # 🚨修正2: update_mode を VALUE_CHANGED（値が変わった瞬間）に変更
         response = AgGrid(
             df_to_edit,
-            gridOptions=gb.build(),
+            gridOptions=grid_options,
             data_return_mode=DataReturnMode.AS_INPUT,
-            update_mode=GridUpdateMode.VALUE_CHANGED, # 値が変更されたら即座にPython側に送る
-            fit_columns_on_grid_load=False,
+            update_mode=GridUpdateMode.VALUE_CHANGED,
+            fit_columns_on_grid_load=False, # 画面幅に強制フィットさせず、横スクロールを許容！
             allow_unsafe_jscode=True, 
-            theme='alpine', 
-            height=500
+            theme='balham', # 高さがコンパクトで一番Excelに近いテーマに変更
+            height=450
         )
         
-        # 🚨修正3: 保存ボタンを撤廃し、変更検知によるオートセーブ機能を実装
         edited_df = pd.DataFrame(response['data'])
         if not edited_df.empty and not df_to_edit.empty:
             changed = False
@@ -324,11 +325,9 @@ if st.session_state.user["is_admin"]:
                 edited_row = edited_df[edited_df["氏名"] == s]
                 orig_row = df_to_edit[df_to_edit["氏名"] == s]
                 if not edited_row.empty and not orig_row.empty:
-                    # 状態の変更検知
                     if str(edited_row.iloc[0]["状態"]) != str(orig_row.iloc[0]["状態"]):
                         changed = True
                         break
-                    # 時間の変更検知
                     for t in time_slots:
                         if str(edited_row.iloc[0].get(t, "")) != str(orig_row.iloc[0].get(t, "")):
                             changed = True
@@ -338,7 +337,7 @@ if st.session_state.user["is_admin"]:
             if changed:
                 save_day_data(target_day_str, edited_df)
                 st.toast(f"✅ 自動保存しました！（{datetime.datetime.now().strftime('%H:%M:%S')}）", icon="💾")
-                st.rerun() # 保存後、合計ラインの再計算のために画面をリフレッシュ
+                st.rerun() 
 
     # 【タブ2】募集設定
     with tab2:
