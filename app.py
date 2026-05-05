@@ -178,13 +178,18 @@ if st.session_state.user["is_admin"]:
         start_of_week = target_date - datetime.timedelta(days=target_date.weekday())
         end_of_week = start_of_week + datetime.timedelta(days=6)
         
+        # 🚨ここを追加：比較のためにPandas専用の型（Timestamp）に揃える
+        pd_start = pd.to_datetime(start_of_week)
+        pd_end = pd.to_datetime(end_of_week)
+        
         all_df = get_all_shift_data()
         
-        # 🚨修正箇所： errors='coerce' を入れて古い「月」「火」データをエラーにせず無視(NaT)する
-        all_df['date_obj'] = pd.to_datetime(all_df['day'], errors='coerce').dt.date
-        all_df = all_df.dropna(subset=['date_obj']) # 変換できなかった古いゴミデータを除外
+        # .dt.date を外し、そのまま日時型(datetime64)として保持する
+        all_df['date_obj'] = pd.to_datetime(all_df['day'], errors='coerce')
+        all_df = all_df.dropna(subset=['date_obj'])
         
-        week_df = all_df[(all_df['date_obj'] >= start_of_week) & (all_df['date_obj'] <= end_of_week)]
+        # 型を揃えた pd_start と pd_end で比較！
+        week_df = all_df[(all_df['date_obj'] >= pd_start) & (all_df['date_obj'] <= pd_end)]
         
         weekly_hours = {}
         for s in staff_list:
