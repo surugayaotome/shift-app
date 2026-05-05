@@ -5,10 +5,10 @@ from sqlalchemy.engine import URL
 from sqlalchemy.pool import NullPool
 import io
 from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 import datetime
 
-# --- AgGrid（Excelライクな表）のインポート ---
+# --- AgGridのインポート ---
 from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode, JsCode
 
 st.set_page_config(page_title="日本橋乙女 シフト管理", layout="wide")
@@ -73,6 +73,13 @@ def init_db():
                 is_admin BOOLEAN DEFAULT FALSE
             );
         """))
+        # 画像通りにID列を追加するための安全なALTER処理
+        try:
+            conn.execute(text("ALTER TABLE staff_master ADD COLUMN staff_id TEXT;"))
+            conn.commit()
+        except:
+            pass # 既に追加されている場合は無視
+            
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS system_config (
                 config_key TEXT PRIMARY KEY,
@@ -82,8 +89,8 @@ def init_db():
         result = conn.execute(text("SELECT COUNT(*) FROM staff_master")).scalar()
         if result == 0:
             conn.execute(text("""
-                INSERT INTO staff_master (staff_name, password, role_name, is_admin) 
-                VALUES ('店長', 'admin1234', '全体統括', TRUE)
+                INSERT INTO staff_master (staff_name, password, role_name, is_admin, staff_id) 
+                VALUES ('店長', 'admin1234', '全体統括', TRUE, '0000')
             """))
         conn.commit()
 
@@ -107,7 +114,7 @@ def save_day_data(day_str, df):
             conn.execute(text("""
                 INSERT INTO shift_data (day, staff_name, off_status, shift_json)
                 VALUES (:day, :staff_name, :off_status, :shift_json)
-            """), {"day": day_str, "staff_name": row["氏名"], "off_status": row["状態"], "shift_json": shift_values})
+            """), {"day": day_str, "staff_name": row["氏名"], "off_status": row["休み"], "shift_json": shift_values})
         conn.commit()
 
 def save_config(key, value):
@@ -130,7 +137,8 @@ def get_config(key, default_value=""):
 if "user" not in st.session_state:
     st.session_state.user = None
 
-time_slots = [f"{h}:{m:02d}" for h in range(10, 18) for m in (0, 30)]
+# 画像に合わせて 8:00〜22:30 に拡張
+time_slots = [f"{h}:{m:02d}" for h in range(8, 23) for m in (0, 30)]
 
 if st.session_state.user is None:
     st.title("🔐 ログイン")
@@ -159,6 +167,7 @@ if st.sidebar.button("ログアウト"):
 
 staff_df = load_staff()
 staff_list = staff_df['staff_name'].tolist()
+staff_id_map = dict(zip(staff_df['staff_name'], staff_df['staff_id']))
 
 # ==========================================
 # 3. 👨‍💼 管理者ダッシュボード
@@ -167,8 +176,9 @@ if st.session_state.user["is_admin"]:
     st.title("👨‍💼 管理者ダッシュボード")
     tab1, tab2, tab3, tab4 = st.tabs(["📝 シフト編集", "📅 募集設定", "👥 スタッフ管理", "📊 Excel出力"])
     
+    # 【タブ1】究極のExcelライク・シフト編集（完成版画像1再現）
     with tab1:
-        st.write("### 📝 シフト編集（自動保存対応）")
+        st.write("### 📝 シフト編集")
         today = datetime.date.today()
         target_date = st.date_input("カレンダーから日付を選択", value=today)
         target_day_str = target_date.strftime("%Y-%m-%d")
@@ -200,18 +210,17 @@ if st.session_state.user["is_admin"]:
             match = raw_df[raw_df["staff_name"] == s]
             if not match.empty:
                 status = match.iloc[0]["off_status"]
-                if status not in ["OFF", "未提出"]: status = "提出済"
-                row = {"氏名": s, "週勤務": f"{weekly_hours[s]:.1f}h", "状態": status}
+                row = {"ID": staff_id_map.get(s, ""), "氏名": s, "週勤務時間": f"{weekly_hours[s]:.1f}", "休み": status}
                 slots = match.iloc[0]["shift_json"].split(",")
                 for j, t in enumerate(time_slots):
                     val = slots[j] if j < len(slots) else ""
                     row[t] = val
                     if val in ['1', '2', '同']: total_counts[t] += 1
             else:
-                row = {"氏名": s, "週勤務": f"{weekly_hours[s]:.1f}h", "状態": "未提出", **{t: "" for t in time_slots}}
+                row = {"ID": staff_id_map.get(s, ""), "氏名": s, "週勤務時間": f"{weekly_hours[s]:.1f}", "休み": "未提出", **{t: "" for t in time_slots}}
             display_data.append(row)
         
-        total_row = {"氏名": "合計ライン", "週勤務": "-", "状態": "-"}
+        total_row = {"ID": "", "氏名": "合計ライン", "週勤務時間": "-", "休み": ""}
         for t in time_slots:
             total_row[t] = str(total_counts[t])
         display_data.append(total_row)
@@ -219,21 +228,28 @@ if st.session_state.user["is_admin"]:
         df_to_edit = pd.DataFrame(display_data)
 
         # ==========================================
-        # 🚨ここから：見切れ対応のための微調整
+        # 🚨ここから：画像1完全再現のためのCSS・JS
         # ==========================================
         editable_js = JsCode("function(params) { return params.node.data['氏名'] !== '合計ライン'; }")
         
         cell_style_js = JsCode("""
         function(params) {
             const v = params.value;
-            let style = {'fontSize': '11px', 'textAlign': 'center', 'padding': '0px'};
-            if (params.colDef.field === '氏名') {
-                style['textAlign'] = 'left';
+            let style = {'fontSize': '11px', 'textAlign': 'center', 'padding': '0px', 'borderRight': '1px solid #e2e2e2'};
+            
+            if (params.colDef.field === '氏名') style['textAlign'] = 'left';
+            if (params.colDef.field === 'ID') style['color'] = '#666';
+
+            if (v === 'OFF' || v === '休') return Object.assign(style, {'backgroundColor': '#ff0000', 'color': '#ffffff'}); // 赤背景＋白文字
+            if (v === '未提出') return Object.assign(style, {'color': '#999999'}); // 薄いグレー文字
+            if (v === '1') return Object.assign(style, {'backgroundColor': '#fce4d6', 'color': '#000000'}); // 薄ピンク
+            if (v === '2') return Object.assign(style, {'backgroundColor': '#ffff00', 'color': '#000000'}); // 黄色
+            if (v === '同') return Object.assign(style, {'backgroundColor': '#00b050', 'color': '#ffffff'}); // 緑＋白文字
+
+            if (params.node.data['氏名'] === '合計ライン') {
+                if (params.colDef.field === '氏名') return Object.assign(style, {'backgroundColor': '#ffff00', 'fontWeight': 'bold'});
+                return Object.assign(style, {'backgroundColor': '#ffff00', 'fontWeight': 'bold'});
             }
-            if (v === 'OFF' || v === '休' || v === '未提出') return Object.assign(style, {'backgroundColor': '#ffe6e6', 'color': '#cc0000', 'fontWeight': 'bold'});
-            if (v === '1' || v === '2' || v === '同') return Object.assign(style, {'backgroundColor': '#e6f0ff', 'color': '#0044cc'});
-            if (v === '提出済') return Object.assign(style, {'backgroundColor': '#e6ffe6', 'color': '#008000'});
-            if (params.node.data['氏名'] === '合計ライン') return Object.assign(style, {'backgroundColor': '#f0f0f0', 'fontWeight': 'bold', 'borderTop': '2px solid #ccc'});
             return style;
         }
         """)
@@ -242,9 +258,9 @@ if st.session_state.user["is_admin"]:
         function(params) {
             if (params.node.data['氏名'] === '合計ライン') return '-';
             let active = 0;
-            const ts = ['10:00','10:30','11:00','11:30','12:00','12:30','13:00','13:30','14:00','14:30','15:00','15:30','16:00','16:30','17:00','17:30'];
+            const ts = [""" + ",".join([f"'{t}'" for t in time_slots]) + """];
             ts.forEach(t => { if (['1', '2', '同'].includes(params.data[t])) active++; });
-            return (active * 0.5).toFixed(1) + 'h';
+            return active === 0 ? "0" : (active * 0.5).toFixed(1);
         }
         """)
         
@@ -252,70 +268,68 @@ if st.session_state.user["is_admin"]:
         function(params) {
             if (params.node.data['氏名'] === '合計ライン') return '-';
             let brk = 0;
-            const ts = ['10:00','10:30','11:00','11:30','12:00','12:30','13:00','13:30','14:00','14:30','15:00','15:30','16:00','16:30','17:00','17:30'];
+            const ts = [""" + ",".join([f"'{t}'" for t in time_slots]) + """];
             ts.forEach(t => { if (params.data[t] === '休') brk++; });
-            return (brk * 0.5).toFixed(1) + 'h';
+            return brk === 0 ? "0" : (brk * 0.5).toFixed(1);
         }
         """)
 
-        # 🚨修正：幅を広げて見切れないように調整
+        # 列定義（画像1の並び順：ID, 氏名, 勤務h, 休憩h, 休み, 時間... 週勤務時間）
         left_cols = [
-            {"field": "氏名", "pinned": "left", "width": 90, "editable": False, "cellStyle": cell_style_js},
-            {"field": "週勤務", "pinned": "left", "width": 70, "editable": False, "cellStyle": cell_style_js},
-            {"field": "状態", "pinned": "left", "width": 75, "editable": editable_js, 
-             "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["未提出", "提出済", "OFF"]}, "cellStyle": cell_style_js}
+            {"field": "ID", "pinned": "left", "width": 55, "editable": False, "cellStyle": cell_style_js},
+            {"field": "氏名", "pinned": "left", "width": 110, "editable": False, "cellStyle": cell_style_js},
+            {"headerName": "勤務h", "field": "勤務h", "pinned": "left", "width": 55, "editable": False, "valueGetter": work_calc_js, "cellStyle": cell_style_js},
+            {"headerName": "休憩h", "field": "休憩h", "pinned": "left", "width": 55, "editable": False, "valueGetter": break_calc_js, "cellStyle": cell_style_js},
+            {"field": "休み", "pinned": "left", "width": 55, "editable": editable_js, 
+             "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["", "未提出", "OFF"]}, "cellStyle": cell_style_js}
         ]
         
+        # 階層化ヘッダー（子は空文字で狭く）
         time_cols = []
-        for h in range(10, 18):
+        for h in range(8, 23):
             children = []
             for m in (0, 30):
                 t = f"{h}:{m:02d}"
                 children.append({
                     "field": t,
-                    "headerName": f"{m:02d}", 
-                    "width": 40, 
+                    "headerName": "", # 画像1の通り文字なし
+                    "width": 22,      # 限界まで細く
+                    "minWidth": 22,
                     "editable": editable_js,
                     "cellEditor": 'agSelectCellEditor',
                     "cellEditorParams": {'values': ["", "1", "2", "同", "休"]},
                     "cellStyle": cell_style_js
                 })
             time_cols.append({
-                "headerName": f"{h}時",
+                "headerName": f"{h}", # 8, 9, 10
                 "children": children
             })
             
-        # 🚨修正：幅を広げて見切れないように調整
         right_cols = [
-            {"field": "勤務h", "pinned": "right", "width": 65, "editable": False, "valueGetter": work_calc_js, "cellStyle": cell_style_js},
-            {"field": "休憩h", "pinned": "right", "width": 65, "editable": False, "valueGetter": break_calc_js, "cellStyle": cell_style_js}
+            {"field": "週勤務時間", "pinned": "right", "width": 75, "editable": False, "cellStyle": cell_style_js}
         ]
 
         grid_options = {
             "columnDefs": left_cols + time_cols + right_cols,
-            "defaultColDef": {
-                "sortable": False, 
-                "suppressMenu": True, 
-                "resizable": True,
-                "suppressMovable": True
-            },
+            "defaultColDef": {"sortable": False, "suppressMenu": True, "resizable": True, "suppressMovable": True},
             "suppressMovableColumns": True, 
             "enableRangeSelection": True,
             "suppressCopyRowsToClipboard": True,
             "enterMovesDownAfterEdit": True,
             "singleClickEdit": True,
             "rowSelection": "multiple",
-            "rowHeight": 24, 
-            "headerHeight": 26, 
-            "groupHeaderHeight": 26
+            "rowHeight": 22, 
+            "headerHeight": 22, 
+            "groupHeaderHeight": 22
         }
         
         custom_css = {
             ".ag-header-cell-text": {"font-size": "10px !important"},
-            ".ag-header-group-text": {"font-size": "11px !important", "font-weight": "bold !important"}
+            ".ag-header-group-text": {"font-size": "11px !important", "text-align": "center", "width": "100%"},
+            ".ag-header-cell": {"padding": "0px !important", "border-right": "1px solid #ddd !important"}
         }
         
-        st.info("💡 【操作ガイド】自動保存対応です！ セルの変更やコピペは、数秒以内に裏でデータベースに保存されます。")
+        st.info("💡 自動保存対応。ドラッグで範囲選択・コピペ対応。")
         
         response = AgGrid(
             df_to_edit,
@@ -326,7 +340,7 @@ if st.session_state.user["is_admin"]:
             fit_columns_on_grid_load=False, 
             allow_unsafe_jscode=True, 
             theme='balham', 
-            height=450
+            height=500
         )
         
         edited_df = pd.DataFrame(response['data'])
@@ -336,7 +350,7 @@ if st.session_state.user["is_admin"]:
                 edited_row = edited_df[edited_df["氏名"] == s]
                 orig_row = df_to_edit[df_to_edit["氏名"] == s]
                 if not edited_row.empty and not orig_row.empty:
-                    if str(edited_row.iloc[0]["状態"]) != str(orig_row.iloc[0]["状態"]):
+                    if str(edited_row.iloc[0]["休み"]) != str(orig_row.iloc[0]["休み"]):
                         changed = True
                         break
                     for t in time_slots:
@@ -366,13 +380,13 @@ if st.session_state.user["is_admin"]:
                 save_config("deadline", deadline.strftime("%Y-%m-%d"))
                 st.success("✅ 募集設定を更新しました！")
 
-    # 【タブ3】スタッフ管理
+    # 【タブ3】スタッフ管理（ID列追加）
     with tab3:
         st.write("#### 📁 CSVで一括インポート")
         @st.cache_data
         def get_csv_template():
-            df_template = pd.DataFrame(columns=["氏名", "パスワード", "担当", "管理者権限"])
-            df_template.loc[0] = ["テスト太郎", "pass123", "ホール", "FALSE"]
+            df_template = pd.DataFrame(columns=["ID", "氏名", "パスワード", "担当", "管理者権限"])
+            df_template.loc[0] = ["1001", "テスト太郎", "pass123", "ホール", "FALSE"]
             return df_template.to_csv(index=False).encode('utf-8-sig')
             
         st.download_button("📥 インポート用CSVテンプレート", data=get_csv_template(), file_name="staff_template.csv", mime="text/csv")
@@ -381,7 +395,7 @@ if st.session_state.user["is_admin"]:
         if uploaded_file:
             try:
                 df_csv = pd.read_csv(uploaded_file)
-                if list(df_csv.columns)[:4] != ["氏名", "パスワード", "担当", "管理者権限"]:
+                if list(df_csv.columns)[:5] != ["ID", "氏名", "パスワード", "担当", "管理者権限"]:
                     st.error("⚠️ 列の定義が異なります。")
                 else:
                     if st.button("CSVデータをデータベースに保存", type="primary"):
@@ -389,11 +403,11 @@ if st.session_state.user["is_admin"]:
                             for _, row in df_csv.iterrows():
                                 is_admin_val = str(row["管理者権限"]).strip().lower() in ['true', '1', 'yes', 'はい']
                                 conn.execute(text("""
-                                    INSERT INTO staff_master (staff_name, password, role_name, is_admin)
-                                    VALUES (:name, :pass, :role, :is_admin)
+                                    INSERT INTO staff_master (staff_id, staff_name, password, role_name, is_admin)
+                                    VALUES (:id, :name, :pass, :role, :is_admin)
                                     ON CONFLICT (staff_name) DO UPDATE 
-                                    SET password = :pass, role_name = :role, is_admin = :is_admin
-                                """), {"name": str(row["氏名"]), "pass": str(row["パスワード"]), "role": str(row["担当"]), "is_admin": is_admin_val})
+                                    SET staff_id = :id, password = :pass, role_name = :role, is_admin = :is_admin
+                                """), {"id": str(row["ID"]), "name": str(row["氏名"]), "pass": str(row["パスワード"]), "role": str(row["担当"]), "is_admin": is_admin_val})
                             conn.commit()
                         st.success("✅ インポート完了！")
                         st.rerun()
@@ -402,56 +416,155 @@ if st.session_state.user["is_admin"]:
         
         st.write("---")
         st.write("#### ✍️ 手動編集")
-        edited_staff = st.data_editor(staff_df, num_rows="dynamic", hide_index=True)
+        edited_staff = st.data_editor(
+            staff_df, 
+            column_config={
+                "staff_id": st.column_config.TextColumn("ID"),
+                "staff_name": st.column_config.TextColumn("氏名"),
+                "password": st.column_config.TextColumn("パスワード"),
+                "role_name": st.column_config.TextColumn("担当"),
+                "is_admin": st.column_config.CheckboxColumn("管理者権限")
+            },
+            num_rows="dynamic", hide_index=True)
+        
         if st.button("手動編集を保存"):
             with engine.connect() as conn:
                 conn.execute(text("DELETE FROM staff_master")) 
                 for _, row in edited_staff[edited_staff['staff_name'].str.strip() != ""].iterrows():
                     conn.execute(text("""
-                        INSERT INTO staff_master (staff_name, password, role_name, is_admin)
-                        VALUES (:name, :pass, :role, :is_admin)
-                    """), {"name": row["staff_name"], "pass": row["password"], "role": row["role_name"], "is_admin": row["is_admin"]})
+                        INSERT INTO staff_master (staff_id, staff_name, password, role_name, is_admin)
+                        VALUES (:id, :name, :pass, :role, :is_admin)
+                    """), {"id": str(row.get("staff_id", "")), "name": row["staff_name"], "pass": row["password"], "role": row["role_name"], "is_admin": row["is_admin"]})
                 conn.commit()
             st.success("✅ 更新完了！")
             st.rerun()
 
-    # 【タブ4】Excel出力
+    # 【タブ4】Excel出力（Image 2のタイル型完全再現）
     with tab4:
-        st.write("指定した期間のシフトをExcelとしてダウンロードします。")
-        ex_start = st.date_input("開始日", value=today)
-        ex_end = st.date_input("終了日", value=today + datetime.timedelta(days=6))
+        st.write("### 📊 Excel出力")
+        output_type = st.radio("出力形式を選択してください", ["日別出力（1日分）", "週別出力（7日分のタイル状配置）"])
+        ex_start = st.date_input("開始日（週別の場合はこの日から7日間）", value=today)
         
-        def create_excel_file(start_date, end_date):
+        def write_day_block(ws, start_row, start_col, day_date):
+            day_str = day_date.strftime("%Y-%m-%d")
+            display_day = day_date.strftime("%m/%d")
+            
+            # ヘッダー構築
+            headers = ["ID", "氏名", "勤務h", "休憩h", "休み"] + time_slots + ["週勤務"]
+            for col_idx, header in enumerate(headers):
+                cell = ws.cell(row=start_row, column=start_col + col_idx)
+                # 時間の場合は「08:00」を「8」のように簡易表示（Image 2用）
+                if ":" in header:
+                    cell.value = ""
+                else:
+                    cell.value = header
+                cell.font = Font(size=9, bold=True)
+                cell.fill = PatternFill(start_color="F0F0F0", end_color="F0F0F0", fill_type="solid")
+                cell.border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+            
+            # 日付ラベルを左上に
+            ws.cell(row=start_row-1, column=start_col).value = display_day
+            ws.cell(row=start_row-1, column=start_col).font = Font(bold=True)
+
+            # データ取得
+            df = load_day_data(day_str)
+            all_df = get_all_shift_data()
+            wk_start = day_date - datetime.timedelta(days=day_date.weekday())
+            wk_end = wk_start + datetime.timedelta(days=6)
+            all_df['date_obj'] = pd.to_datetime(all_df['day'], errors='coerce')
+            week_df = all_df[(all_df['date_obj'] >= pd.to_datetime(wk_start)) & (all_df['date_obj'] <= pd.to_datetime(wk_end))]
+            
+            current_row = start_row + 1
+            for s in staff_list:
+                s_id = staff_id_map.get(s, "")
+                match = df[df["staff_name"] == s]
+                
+                # 週勤務計算
+                staff_wk = week_df[week_df['staff_name'] == s]
+                wk_h = 0
+                for _, r in staff_wk.iterrows():
+                    slots = r["shift_json"].split(",")
+                    wk_h += sum([1 for slot in slots if slot in ['1', '2', '同']])
+                wk_h_str = f"{wk_h * 0.5:.1f}"
+
+                if not match.empty:
+                    status = match.iloc[0]["off_status"]
+                    shift_vals = match.iloc[0]["shift_json"].split(",")
+                    
+                    work_h = sum([1 for x in shift_vals if x in ['1','2','同']]) * 0.5
+                    break_h = sum([1 for x in shift_vals if x == '休']) * 0.5
+                    
+                    row_data = [s_id, s, work_h if work_h>0 else "0", break_h if break_h>0 else "0", status]
+                    for i in range(len(time_slots)):
+                        row_data.append(shift_vals[i] if i < len(shift_vals) else "")
+                    row_data.append(wk_h_str)
+                else:
+                    row_data = [s_id, s, "0", "0", "未提出"] + [""] * len(time_slots) + [wk_h_str]
+                
+                # Excelへ書き込み＆色付け
+                for col_idx, val in enumerate(row_data):
+                    cell = ws.cell(row=current_row, column=start_col + col_idx)
+                    cell.value = val
+                    cell.font = Font(size=9)
+                    cell.border = Border(left=Side(style='dotted', color='CCCCCC'), right=Side(style='dotted', color='CCCCCC'), bottom=Side(style='thin', color='EEEEEE'))
+                    cell.alignment = Alignment(horizontal='center')
+                    
+                    # 色の適用（Image 1/2 仕様）
+                    if val == '1': cell.fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+                    elif val == '2': cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+                    elif val in ['休', 'OFF']: 
+                        cell.fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+                        cell.font = Font(size=9, color="FFFFFF")
+                    elif val == '同': 
+                        cell.fill = PatternFill(start_color="00B050", end_color="00B050", fill_type="solid")
+                        cell.font = Font(size=9, color="FFFFFF")
+                        
+                current_row += 1
+            
+            # 合計ライン
+            ws.cell(row=current_row, column=start_col+1).value = "合計ライン"
+            ws.cell(row=current_row, column=start_col+1).fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+            return current_row + 2 # 次のブロック用の間隔
+
+        def export_excel():
             output = io.BytesIO()
             wb = Workbook()
-            wb.remove(wb.active)
-            delta = end_date - start_date
-            for i in range(delta.days + 1):
-                d_date = start_date + datetime.timedelta(days=i)
-                d_str = d_date.strftime("%Y-%m-%d")
-                ws = wb.create_sheet(title=d_date.strftime("%m月%d日"))
-                headers = ["氏名", "状態"] + time_slots
-                ws.append(headers)
-                df = load_day_data(d_str)
-                for s in staff_list:
-                    match = df[df["staff_name"] == s]
-                    if not match.empty:
-                        status = match.iloc[0]["off_status"]
-                        if status not in ["OFF", "未提出"]: status = "提出済"
-                        shift_vals = match.iloc[0]["shift_json"].split(",")
-                        row_data = [s, status] + [shift_vals[i] if i < len(shift_vals) else "" for i in range(len(time_slots))]
+            ws = wb.active
+            ws.title = "シフト表"
+            
+            # 列幅の調整（時間列は狭く）
+            for c in range(1, 100): ws.column_dimensions[openpyxl.utils.get_column_letter(c)].width = 3
+            ws.column_dimensions['A'].width = 5
+            ws.column_dimensions['B'].width = 12
+            
+            if output_type == "日別出力（1日分）":
+                write_day_block(ws, 2, 1, ex_start)
+                filename = f"シフト表_{ex_start.strftime('%Y%m%d')}.xlsx"
+            else:
+                # 週別出力（Image 2のタイル配置: 左列に月火水木、右列に金土日）
+                # 簡略化のため、左列にDay1〜Day4、右列にDay5〜Day7を配置
+                col_offset = len(time_slots) + 7
+                ws.column_dimensions[openpyxl.utils.get_column_letter(col_offset)].width = 5 # 列間の余白
+                ws.column_dimensions[openpyxl.utils.get_column_letter(col_offset+1)].width = 5
+                ws.column_dimensions[openpyxl.utils.get_column_letter(col_offset+2)].width = 12
+                
+                left_row = 2
+                right_row = 2
+                for i in range(7):
+                    target_d = ex_start + datetime.timedelta(days=i)
+                    if i < 4:
+                        left_row = write_day_block(ws, left_row, 1, target_d)
                     else:
-                        row_data = [s, "未提出"] + [""] * len(time_slots)
-                    ws.append(row_data)
-                for cell in ws[1]:
-                    cell.font = Font(bold=True)
-                    cell.fill = PatternFill(start_color="F0F0F0", end_color="F0F0F0", fill_type="solid")
-                ws.column_dimensions['A'].width = 15
+                        right_row = write_day_block(ws, right_row, col_offset + 1, target_d)
+                        
+                filename = f"週間シフト_{ex_start.strftime('%m%d')}-{(ex_start + datetime.timedelta(days=6)).strftime('%m%d')}.xlsx"
+                
             wb.save(output)
-            return output.getvalue()
+            return output.getvalue(), filename
 
-        if ex_end >= ex_start:
-            st.download_button(label="📥 指定期間のシフトを出力", data=create_excel_file(ex_start, ex_end), file_name=f"シフト表_{ex_start.strftime('%m%d')}-{ex_end.strftime('%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+        import openpyxl # Excel処理用に追加
+        excel_data, dl_filename = export_excel()
+        st.download_button(label=f"📥 {output_type}をExcelでダウンロード", data=excel_data, file_name=dl_filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
 # ==========================================
 # 4. 📱 従業員メニュー
@@ -474,14 +587,14 @@ else:
             my_name = st.session_state.user["name"]
             for d_str in target_dates:
                 df = load_day_data(d_str)
-                status = "OFF" if d_str in off_days else "提出済"
+                status = "OFF" if d_str in off_days else ""
                 if my_name in df["staff_name"].values:
                     df.loc[df["staff_name"] == my_name, "off_status"] = status
                 else:
                     new_row = pd.DataFrame([{"day": d_str, "staff_name": my_name, "off_status": status, "shift_json": ",".join([""]*len(time_slots))}])
                     df = pd.concat([df, new_row], ignore_index=True)
                 
-                save_df = pd.DataFrame([{"氏名": r["staff_name"], "状態": r["off_status"], **dict(zip(time_slots, r["shift_json"].split(",")))} for _, r in df.iterrows()])
+                save_df = pd.DataFrame([{"氏名": r["staff_name"], "休み": r["off_status"], **dict(zip(time_slots, r["shift_json"].split(",")))} for _, r in df.iterrows()])
                 save_day_data(d_str, save_df)
                 
             st.success("✅ あなたのシフト希望を提出しました！")
