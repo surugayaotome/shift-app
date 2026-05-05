@@ -56,61 +56,40 @@ engine = get_engine()
 def init_db():
     if engine is None: return
     
-    # 各命令をリスト化
-    commands = [
-        """
-        CREATE TABLE IF NOT EXISTS shift_data (
-            day TEXT,
-            staff_name TEXT,
-            off_status TEXT,
-            shift_json TEXT,
-            PRIMARY KEY (day, staff_name)
-        );
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS staff_master (
-            staff_name TEXT PRIMARY KEY,
-            password TEXT NOT NULL,
-            role_name TEXT,
-            is_admin BOOLEAN DEFAULT FALSE
-        );
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS system_config (
-            config_key TEXT PRIMARY KEY,
-            config_value TEXT
-        );
-        """
-    ]
+    # 🚨 ポイント: 1つの関数内で「engine.begin()」を何度も呼ぶことで、
+    # 各命令ごとに「接続→実行→コミット（またはエラーでロールバック）→切断」を完結させます。
 
-    with engine.connect() as conn:
-        # 基本テーブルの作成（1つずつ確定させる）
-        for cmd in commands:
-            try:
+    # 1. 各テーブルの作成
+    for cmd in [
+        "CREATE TABLE IF NOT EXISTS shift_data (day TEXT, staff_name TEXT, off_status TEXT, shift_json TEXT, PRIMARY KEY (day, staff_name));",
+        "CREATE TABLE IF NOT EXISTS staff_master (staff_name TEXT PRIMARY KEY, password TEXT NOT NULL, role_name TEXT, is_admin BOOLEAN DEFAULT FALSE);",
+        "CREATE TABLE IF NOT EXISTS system_config (config_key TEXT PRIMARY KEY, config_value TEXT);"
+    ]:
+        try:
+            with engine.begin() as conn:
                 conn.execute(text(cmd))
-                conn.commit() 
-            except Exception:
-                pass 
-
-        # 🚨 ALTER TABLE（カラム追加）は個別にトライ。失敗しても気にしない。
-        try:
-            conn.execute(text("ALTER TABLE staff_master ADD COLUMN staff_id TEXT;"))
-            conn.commit()
         except Exception:
-            # すでにカラムがある場合はここを通るが、commitは独立しているので次に影響しない
-            pass
+            pass # すでに存在する場合は無視
 
-        # 初期データの投入
-        try:
+    # 2. 既存テーブルへのカラム追加 (ここが一番コケやすい)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE staff_master ADD COLUMN staff_id TEXT;"))
+    except Exception:
+        # すでにカラムがある場合は、ここで「この接続だけ」が失敗して終わるので、次に影響しない
+        pass
+
+    # 3. 初期データの投入
+    try:
+        with engine.begin() as conn:
             result = conn.execute(text("SELECT COUNT(*) FROM staff_master")).scalar()
             if result == 0:
                 conn.execute(text("""
                     INSERT INTO staff_master (staff_name, password, role_name, is_admin, staff_id) 
                     VALUES ('店長', 'admin1234', '全体統括', TRUE, '0000')
                 """))
-                conn.commit()
-        except Exception:
-            pass
+    except Exception:
+        pass
             
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS system_config (
