@@ -2,14 +2,12 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
-import urllib.parse
-from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 import io
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font
 
 st.set_page_config(page_title="日本橋乙女 シフト管理", layout="wide")
 
-# --- 危険なボタンの赤色設定 ---
 st.markdown("""
 <style>
 div[data-testid="stButton"] button[kind="primary"] {
@@ -21,7 +19,7 @@ div[data-testid="stButton"] button[kind="primary"] {
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. データベース接続＆操作関数
+# 1. データベース接続＆初期化
 # ==========================================
 @st.cache_resource
 def get_engine():
@@ -53,6 +51,7 @@ engine = get_engine()
 def init_db():
     if engine is None: return
     with engine.connect() as conn:
+        # シフトテーブル
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS shift_data (
                 day TEXT,
@@ -62,16 +61,34 @@ def init_db():
                 PRIMARY KEY (day, staff_name)
             );
         """))
+        # スタッフマスタテーブル（新規）
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS staff_master (
+                staff_name TEXT PRIMARY KEY,
+                password TEXT NOT NULL,
+                role_name TEXT,
+                is_admin BOOLEAN DEFAULT FALSE
+            );
+        """))
+        
+        # 初期管理者がいなければ作成（初回ログイン用）
+        result = conn.execute(text("SELECT COUNT(*) FROM staff_master")).scalar()
+        if result == 0:
+            conn.execute(text("""
+                INSERT INTO staff_master (staff_name, password, role_name, is_admin) 
+                VALUES ('店長', 'admin1234', '全体統括', TRUE)
+            """))
         conn.commit()
 
 init_db()
 
-# データを読み込む関数
-def load_weekly_data(day):
-    query = f"SELECT * FROM shift_data WHERE day = '{day}'"
-    return pd.read_sql(query, engine)
+# DB操作系関数
+def load_staff():
+    return pd.read_sql("SELECT * FROM staff_master", engine)
 
-# データを保存する関数
+def load_weekly_data(day):
+    return pd.read_sql(f"SELECT * FROM shift_data WHERE day = '{day}'", engine)
+
 def save_day_data(day, df):
     with engine.connect() as conn:
         conn.execute(text(f"DELETE FROM shift_data WHERE day = '{day}'"))
@@ -84,135 +101,182 @@ def save_day_data(day, df):
         conn.commit()
 
 # ==========================================
-# 2. 基本設定
+# 2. セッション（ログイン）管理
 # ==========================================
+if "user" not in st.session_state:
+    st.session_state.user = None
+
 days_of_week = ["月", "火", "水", "木", "金", "土", "日"]
-staff_list = ["奥村幸子", "宮崎春秋代", "陰山爽", "徳永久玲美", "北田詩歩", "寺前吏紗", "上田鈴奈", "小鳥美貴"]
 time_slots = [f"{h}:{m:02d}" for h in range(10, 18) for m in (0, 30)]
 
-role = st.sidebar.radio("▼ 画面切り替え", ["📱 従業員画面", "👨‍💼 管理者画面"])
+# --- ログイン画面 ---
+if st.session_state.user is None:
+    st.title("🔐 ログイン")
+    st.info("初回は 名前:「店長」、パスワード:「admin1234」でログインしてください。")
+    
+    with st.form("login_form"):
+        input_name = st.text_input("氏名")
+        input_pass = st.text_input("パスワード", type="password")
+        submit = st.form_submit_button("ログイン", type="primary")
+        
+        if submit:
+            staff_df = load_staff()
+            user_row = staff_df[(staff_df['staff_name'] == input_name) & (staff_df['password'] == input_pass)]
+            
+            if not user_row.empty:
+                st.session_state.user = {
+                    "name": user_row.iloc[0]['staff_name'],
+                    "is_admin": user_row.iloc[0]['is_admin'],
+                    "role": user_row.iloc[0]['role_name']
+                }
+                st.rerun()
+            else:
+                st.error("氏名またはパスワードが間違っています。")
+    st.stop() # ログインしていない場合はここで処理を止める
+
+# --- サイドバー（ログアウト＆ユーザー情報） ---
+st.sidebar.write(f"👤 **{st.session_state.user['name']}** さん")
+st.sidebar.write(f"🏷️ 担当: {st.session_state.user['role']}")
+if st.sidebar.button("ログアウト"):
+    st.session_state.user = None
+    st.rerun()
+
+st.sidebar.markdown("---")
 
 # ==========================================
-# 3. 📱 従業員画面：希望提出
+# 3. メイン画面の分岐
 # ==========================================
-if role == "📱 従業員画面":
-    st.title("📱 従業員用：希望シフト提出")
-    st.info("お休みの希望曜日を選んで「提出」を押してください。")
+staff_df = load_staff()
+staff_list = staff_df['staff_name'].tolist()
+
+# 👨‍💼 管理者メニュー
+if st.session_state.user["is_admin"]:
+    st.title("👨‍💼 管理者ダッシュボード")
+    tab1, tab2, tab3 = st.tabs(["📝 シフト編集", "👥 スタッフ管理", "📊 Excel出力"])
     
-    staff_name = st.selectbox("あなたの名前を選択してください", [""] + staff_list)
-    
-    if staff_name:
-        off_days = st.multiselect("お休み（OFF）希望の曜日", days_of_week)
+    # 【タブ1】シフト編集
+    with tab1:
+        st.write("各曜日のシフトを調整・保存します。")
+        day_tabs = st.tabs(days_of_week)
+        for i, d in enumerate(days_of_week):
+            with day_tabs[i]:
+                raw_df = load_weekly_data(d)
+                display_data = []
+                for s in staff_list:
+                    match = raw_df[raw_df["staff_name"] == s]
+                    if not match.empty:
+                        row = {"氏名": s, "休み": match.iloc[0]["off_status"]}
+                        slots = match.iloc[0]["shift_json"].split(",")
+                        for j, t in enumerate(time_slots):
+                            row[t] = slots[j] if j < len(slots) else ""
+                    else:
+                        row = {"氏名": s, "休み": "", **{t: "" for t in time_slots}}
+                    display_data.append(row)
+                
+                df_to_edit = pd.DataFrame(display_data)
+                col_config = {"氏名": st.column_config.TextColumn(disabled=True), "休み": st.column_config.TextColumn(disabled=True)}
+                for t in time_slots: 
+                    col_config[t] = st.column_config.SelectboxColumn(t, options=["", "1", "2", "同", "休"], width="small")
+                
+                edited_df = st.data_editor(df_to_edit, column_config=col_config, hide_index=True, key=f"editor_{d}")
+                if st.button(f"💾 {d}曜日の変更を保存", key=f"save_{d}"):
+                    save_day_data(d, edited_df)
+                    st.toast(f"✅ {d}曜日のデータを更新しました！")
+
+    # 【タブ2】スタッフ管理（担当・パスワードの登録）
+    with tab2:
+        st.write("従業員の追加、削除、パスワード設定、権限の変更を行います。")
+        st.warning("※行を追加する場合は、表の一番下の空白行に入力してください。")
         
-        if st.button("シフトを提出する", type="primary"):
+        # スタッフ管理用データエディタ
+        edited_staff = st.data_editor(
+            staff_df,
+            column_config={
+                "staff_name": st.column_config.TextColumn("氏名 (必須)"),
+                "password": st.column_config.TextColumn("パスワード"),
+                "role_name": st.column_config.TextColumn("担当/役割"),
+                "is_admin": st.column_config.CheckboxColumn("管理者権限")
+            },
+            num_rows="dynamic",
+            hide_index=True,
+            key="staff_editor"
+        )
+        
+        if st.button("👥 スタッフ情報を一括保存", type="primary"):
+            # 空白の名前を除外
+            valid_staff = edited_staff[edited_staff['staff_name'].str.strip() != ""]
+            with engine.connect() as conn:
+                conn.execute(text("DELETE FROM staff_master")) # 一旦リセットして再登録
+                for _, row in valid_staff.iterrows():
+                    conn.execute(text("""
+                        INSERT INTO staff_master (staff_name, password, role_name, is_admin)
+                        VALUES (:name, :pass, :role, :is_admin)
+                    """), {
+                        "name": row["staff_name"], 
+                        "pass": row["password"], 
+                        "role": row["role_name"], 
+                        "is_admin": row["is_admin"]
+                    })
+                conn.commit()
+            st.success("✅ スタッフ情報を更新しました！")
+            st.rerun()
+
+    # 【タブ3】Excel出力
+    with tab3:
+        st.write("現在のデータベースの状態をExcelとしてダウンロードします。")
+        def create_excel_file():
+            output = io.BytesIO()
+            wb = Workbook()
+            wb.remove(wb.active)
             for d in days_of_week:
-                # 既存データを読み込んで、自分の行だけ更新または追加する
+                ws = wb.create_sheet(title=f"{d}曜日")
+                headers = ["氏名", "休み"] + time_slots
+                ws.append(headers)
                 df = load_weekly_data(d)
-                off_status = "OFF" if d in off_days else ""
-                
-                if staff_name in df["staff_name"].values:
-                    df.loc[df["staff_name"] == staff_name, "off_status"] = off_status
-                else:
-                    new_row = pd.DataFrame([{"day": d, "staff_name": staff_name, "off_status": off_status, "shift_json": ",".join([""]*len(time_slots))}])
-                    df = pd.concat([df, new_row], ignore_index=True)
-                
-                # DB保存用に整形
-                save_df = pd.DataFrame([{"氏名": r["staff_name"], "休み": r["off_status"], **dict(zip(time_slots, r["shift_json"].split(",")))} for _, r in df.iterrows()])
-                save_day_data(d, save_df)
-                
-            st.success("✅ シフト希望をデータベースに保存しました！")
+                for s in staff_list:
+                    match = df[df["staff_name"] == s]
+                    if not match.empty:
+                        off_val = match.iloc[0]["off_status"]
+                        shift_vals = match.iloc[0]["shift_json"].split(",")
+                        row_data = [s, off_val] + [shift_vals[i] if i < len(shift_vals) else "" for i in range(len(time_slots))]
+                    else:
+                        row_data = [s, ""] + [""] * len(time_slots)
+                    ws.append(row_data)
+                for cell in ws[1]:
+                    cell.font = Font(bold=True)
+                    cell.fill = PatternFill(start_color="F0F0F0", end_color="F0F0F0", fill_type="solid")
+                ws.column_dimensions['A'].width = 15
+            wb.save(output)
+            return output.getvalue()
 
-# ==========================================
-# 4. 👨‍💼 管理者画面：編集と出力
-# ==========================================
-elif role == "👨‍💼 管理者画面":
-    st.title("👨‍💼 管理者：シフト編集・Excel出力")
-    
-    tabs = st.tabs(days_of_week)
-    for i, d in enumerate(days_of_week):
-        with tabs[i]:
-            st.write(f"### {d}曜日のシフト")
-            
-            # DBから読み込んで表示用に整形
-            raw_df = load_weekly_data(d)
-            display_data = []
-            for s in staff_list:
-                match = raw_df[raw_df["staff_name"] == s]
-                if not match.empty:
-                    row = {"氏名": s, "休み": match.iloc[0]["off_status"]}
-                    slots = match.iloc[0]["shift_json"].split(",")
-                    for j, t in enumerate(time_slots):
-                        row[t] = slots[j] if j < len(slots) else ""
-                else:
-                    row = {"氏名": s, "休み": "", **{t: "" for t in time_slots}}
-                display_data.append(row)
-            
-            df_to_edit = pd.DataFrame(display_data)
-            
-            # 編集UIの設定
-            col_config = {
-                "氏名": st.column_config.TextColumn(disabled=True), 
-                "休み": st.column_config.TextColumn(disabled=True)
-            }
-            for t in time_slots: 
-                col_config[t] = st.column_config.SelectboxColumn(t, options=["", "1", "2", "同", "休"], width="small")
-            
-            # データエディタの表示
-            edited_df = st.data_editor(df_to_edit, column_config=col_config, hide_index=True, key=f"editor_{d}")
-            
-            # 保存ボタン
-            if st.button(f"💾 {d}曜日の変更を保存"):
-                save_day_data(d, edited_df)
-                st.toast(f"✅ {d}曜日のデータを更新しました！")
+        st.download_button(
+            label="📥 全曜日のシフトをExcelでダウンロード",
+            data=create_excel_file(),
+            file_name="シフト表_最新版.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
 
-    # === 管理者画面の一番下（st.warning を消して以下を追加） ===
-    st.write("---")
-    st.write("### 📊 シフト表のExcel出力")
+# 📱 従業員メニュー（一般権限）
+else:
+    st.title("📱 シフト希望提出")
+    st.info(f"ログイン中のユーザー: **{st.session_state.user['name']}** さん")
     
-    # Excel生成関数
-    def create_excel_file():
-        output = io.BytesIO()
-        wb = Workbook()
-        wb.remove(wb.active) # デフォルトの空シートを削除
-        
+    off_days = st.multiselect("お休み（OFF）希望の曜日を選んでください", days_of_week)
+    
+    if st.button("シフトを提出する", type="primary"):
+        my_name = st.session_state.user["name"]
         for d in days_of_week:
-            ws = wb.create_sheet(title=f"{d}曜日")
-            
-            # 1行目：ヘッダーの書き込み
-            headers = ["氏名", "休み"] + time_slots
-            ws.append(headers)
-            
-            # DBから最新のデータを取得して書き込み
             df = load_weekly_data(d)
-            for s in staff_list:
-                match = df[df["staff_name"] == s]
-                if not match.empty:
-                    off_val = match.iloc[0]["off_status"]
-                    shift_vals = match.iloc[0]["shift_json"].split(",")
-                    # 空白を埋めてサイズを合わせる
-                    row_data = [s, off_val] + [shift_vals[i] if i < len(shift_vals) else "" for i in range(len(time_slots))]
-                else:
-                    row_data = [s, ""] + [""] * len(time_slots)
-                
-                ws.append(row_data)
+            off_status = "OFF" if d in off_days else ""
             
-            # 簡単な装飾（ヘッダーを太字＆グレー背景にして見やすく）
-            for cell in ws[1]:
-                cell.font = Font(bold=True)
-                cell.fill = PatternFill(start_color="F0F0F0", end_color="F0F0F0", fill_type="solid")
-                
-            # 列幅の調整（氏名列だけ少し広く）
-            ws.column_dimensions['A'].width = 15
-                
-        wb.save(output)
-        return output.getvalue()
-
-    # Streamlitのダウンロードボタン
-    excel_data = create_excel_file()
-    st.download_button(
-        label="📥 全曜日のシフトをExcelでダウンロード",
-        data=excel_data,
-        file_name="シフト表_最新版.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary" # ここをprimaryにすることで、設定した赤色ボタンになります
-    )
+            if my_name in df["staff_name"].values:
+                df.loc[df["staff_name"] == my_name, "off_status"] = off_status
+            else:
+                new_row = pd.DataFrame([{"day": d, "staff_name": my_name, "off_status": off_status, "shift_json": ",".join([""]*len(time_slots))}])
+                df = pd.concat([df, new_row], ignore_index=True)
+            
+            save_df = pd.DataFrame([{"氏名": r["staff_name"], "休み": r["off_status"], **dict(zip(time_slots, r["shift_json"].split(",")))} for _, r in df.iterrows()])
+            save_day_data(d, save_df)
+            
+        st.success("✅ あなたのシフト希望を提出しました！")
