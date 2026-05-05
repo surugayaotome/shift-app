@@ -167,7 +167,6 @@ if st.session_state.user["is_admin"]:
     st.title("👨‍💼 管理者ダッシュボード")
     tab1, tab2, tab3, tab4 = st.tabs(["📝 シフト編集", "📅 募集設定", "👥 スタッフ管理", "📊 Excel出力"])
     
-    # 【タブ1】究極のExcelライク・シフト編集（極小・圧縮全体俯瞰版）
     with tab1:
         st.write("### 📝 シフト編集（自動保存対応）")
         today = datetime.date.today()
@@ -220,11 +219,10 @@ if st.session_state.user["is_admin"]:
         df_to_edit = pd.DataFrame(display_data)
 
         # ==========================================
-        # 🚨ここから：全体を俯瞰するための極小・圧縮設定
+        # 🚨ここから：全体俯瞰 ＆ 【列移動ロック追加】設定
         # ==========================================
         editable_js = JsCode("function(params) { return params.node.data['氏名'] !== '合計ライン'; }")
         
-        # フォントサイズを「11px」に固定し、余白を削って中央寄せ
         cell_style_js = JsCode("""
         function(params) {
             const v = params.value;
@@ -260,7 +258,6 @@ if st.session_state.user["is_admin"]:
         }
         """)
 
-        # 1. 左側の固定列（幅を大幅に圧縮）
         left_cols = [
             {"field": "氏名", "pinned": "left", "width": 85, "editable": False, "cellStyle": cell_style_js},
             {"field": "週勤務", "pinned": "left", "width": 55, "editable": False, "cellStyle": cell_style_js},
@@ -268,7 +265,6 @@ if st.session_state.user["is_admin"]:
              "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["未提出", "提出済", "OFF"]}, "cellStyle": cell_style_js}
         ]
         
-        # 2. 時間の列（幅を「40」まで絞り、1画面に収める）
         time_cols = []
         for h in range(10, 18):
             children = []
@@ -277,7 +273,7 @@ if st.session_state.user["is_admin"]:
                 children.append({
                     "field": t,
                     "headerName": f"{m:02d}", 
-                    "width": 40, # プルダウンの矢印が入る限界の細さ
+                    "width": 40, 
                     "editable": editable_js,
                     "cellEditor": 'agSelectCellEditor',
                     "cellEditorParams": {'values': ["", "1", "2", "同", "休"]},
@@ -288,31 +284,31 @@ if st.session_state.user["is_admin"]:
                 "children": children
             })
             
-        # 3. 右側の計算列（幅を圧縮）
         right_cols = [
             {"field": "勤務h", "pinned": "right", "width": 55, "editable": False, "valueGetter": work_calc_js, "cellStyle": cell_style_js},
             {"field": "休憩h", "pinned": "right", "width": 55, "editable": False, "valueGetter": break_calc_js, "cellStyle": cell_style_js}
         ]
 
-        # 4. 表全体の設定（行の高さも限界まで詰める）
+        # 🚨修正：表全体の設定に suppressMovableColumns と defaultColDef の suppressMovable を追加
         grid_options = {
             "columnDefs": left_cols + time_cols + right_cols,
             "defaultColDef": {
                 "sortable": False, 
                 "suppressMenu": True, 
-                "resizable": True
+                "resizable": True,
+                "suppressMovable": True  # 列ごとの移動を禁止
             },
+            "suppressMovableColumns": True, # 表全体の列ドラッグ移動を完全禁止
             "enableRangeSelection": True,
             "suppressCopyRowsToClipboard": True,
             "enterMovesDownAfterEdit": True,
             "singleClickEdit": True,
             "rowSelection": "multiple",
-            "rowHeight": 24, # 行の高さをExcel並みに圧縮
-            "headerHeight": 26, # ヘッダーの高さを圧縮
+            "rowHeight": 24, 
+            "headerHeight": 26, 
             "groupHeaderHeight": 26
         }
         
-        # 🚨 ヘッダーの文字も強制的に小さくするCSS
         custom_css = {
             ".ag-header-cell-text": {"font-size": "10px !important"},
             ".ag-header-group-text": {"font-size": "11px !important", "font-weight": "bold !important"}
@@ -328,7 +324,7 @@ if st.session_state.user["is_admin"]:
             update_mode=GridUpdateMode.VALUE_CHANGED,
             fit_columns_on_grid_load=False, 
             allow_unsafe_jscode=True, 
-            theme='balham', # 高さが最も詰まるbalhamテーマを採用
+            theme='balham', 
             height=450
         )
         
