@@ -9,16 +9,17 @@ import openpyxl
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-import hashlib # ループ防止用
+import hashlib # 🚨 ループ防止用
 
 # --- AgGridのインポート ---
 from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode, JsCode
 
 st.set_page_config(page_title="日本橋乙女 シフト管理", layout="wide")
 
-# 🚨 CSSで見切れ・警告・デザインを物理的に解決
+# 🚨 1. CSSで見切れ・レイアウトを物理的に解決
 st.markdown("""
 <style>
+/* セル内の余白をゼロにし、文字が絶対に見切れないように強制 */
 .ag-theme-balham .ag-cell {
     padding-left: 0px !important;
     padding-right: 0px !important;
@@ -28,6 +29,7 @@ st.markdown("""
     align-items: center !important;
     justify-content: center !important;
 }
+/* ヘッダー文字の見切れ対策 */
 .ag-header-cell-label {
     justify-content: center !important;
     padding: 0 !important;
@@ -36,6 +38,7 @@ st.markdown("""
     font-size: 10px !important;
     text-overflow: clip !important;
 }
+/* Streamlitのボタン色 */
 div[data-testid="stButton"] button[kind="primary"] {
     background-color: #ff4b4b !important;
     color: white !important;
@@ -44,7 +47,7 @@ div[data-testid="stButton"] button[kind="primary"] {
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. データベース接続
+# 2. データベース接続
 # ==========================================
 @st.cache_resource
 def get_engine():
@@ -86,10 +89,10 @@ def init_db():
 init_db()
 
 # ==========================================
-# 2. データ処理・関数
+# 3. データ処理・関数
 # ==========================================
 def load_day_data(day_str):
-    return pd.read_sql(text(f"SELECT * FROM shift_data WHERE day = :d"), engine, params={"d": day_str})
+    return pd.read_sql(text("SELECT * FROM shift_data WHERE day = :d"), engine, params={"d": day_str})
 
 def get_all_shift_data():
     return pd.read_sql(text("SELECT * FROM shift_data"), engine)
@@ -117,7 +120,7 @@ def get_config(key, default=""):
     except: return default
 
 # ==========================================
-# 3. メイン・アプリ
+# 4. メイン・アプリ
 # ==========================================
 time_slots = [f"{h}:{m:02d}" for h in range(8, 23) for m in (0, 30)]
 
@@ -188,8 +191,8 @@ if st.session_state.user["is_admin"]:
         display_data.append({"ID": "", "氏名": "合計ライン", "週勤務時間": "-", "本人希望": "", **{t: str(total_counts[t]) for t in time_slots}})
         df_to_edit = pd.DataFrame(display_data)
 
-        # 🚨 無限ループ防止用のハッシュ計算
-        current_data_hash = hashlib.md2(pd.util.hash_pandas_object(df_to_edit).values).hexdigest()
+        # 🚨 無限ループ防止用のハッシュ計算 (md2からmd5に変更 + tobytes)
+        current_data_hash = hashlib.md5(pd.util.hash_pandas_object(df_to_edit).values.tobytes()).hexdigest()
 
         cell_style_js = JsCode("""
         function(params) {
@@ -236,9 +239,9 @@ if st.session_state.user["is_admin"]:
         
         res = AgGrid(df_to_edit, gridOptions=grid_opts, update_mode=GridUpdateMode.VALUE_CHANGED, fit_columns_on_grid_load=False, allow_unsafe_jscode=True, theme='balham', height=500)
         
-        # 🚨 型変換による無限ループを防ぐため、ハッシュで厳格に比較
+        # 🚨 型変換による無限ループを防ぐため、ハッシュで厳格に比較 (md5)
         new_df = pd.DataFrame(res['data'])
-        new_data_hash = hashlib.md2(pd.util.hash_pandas_object(new_df).values).hexdigest()
+        new_data_hash = hashlib.md5(pd.util.hash_pandas_object(new_df).values.tobytes()).hexdigest()
 
         if current_data_hash != new_data_hash:
             save_day_data(target_day_str, new_df)
@@ -260,7 +263,6 @@ if st.session_state.user["is_admin"]:
     # --- タブ3: スタッフ管理 ---
     with tab3:
         st.write("### 👥 スタッフ管理")
-        # CSV一括インポート機能
         up_file = st.file_uploader("CSVインポート", type="csv")
         if up_file:
             cdf = pd.read_csv(up_file)
@@ -270,7 +272,6 @@ if st.session_state.user["is_admin"]:
                         conn.execute(text("INSERT INTO staff_master (staff_id, staff_name, password, role_name, is_admin) VALUES (:id, :n, :p, :r, :a) ON CONFLICT (staff_name) DO UPDATE SET staff_id=:id"), {"id":str(r['ID']), "n":str(r['氏名']), "p":str(r['パスワード']), "r":str(r['担当']), "a":str(r['管理者権限']).lower()=='true'})
                 st.success("インポート完了")
 
-        # 手動エディタ
         edited_staff = st.data_editor(staff_df_master, num_rows="dynamic", hide_index=True)
         if st.button("手動変更を保存"):
             with engine.begin() as conn:
