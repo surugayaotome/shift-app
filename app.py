@@ -21,8 +21,11 @@ div[data-testid="stButton"] button[kind="primary"] {
 # --- 1. データベース接続設定 ---
 @st.cache_resource
 def get_engine():
-    # SecretsからURIを取得してSQLAlchemyエンジンを作成
-    return create_engine(st.secrets["database"]["uri"])
+    # URIの先頭を強制的に postgresql+psycopg2:// に置換して確実にドライバーを指定する
+    uri = st.secrets["database"]["uri"]
+    if uri.startswith("postgresql://"):
+        uri = uri.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return create_engine(uri)
 
 engine = get_engine()
 
