@@ -165,5 +165,54 @@ elif role == "👨‍💼 管理者画面":
                 save_day_data(d, edited_df)
                 st.toast(f"✅ {d}曜日のデータを更新しました！")
 
+    # === 管理者画面の一番下（st.warning を消して以下を追加） ===
     st.write("---")
-    st.warning("※Excel出力機能は、データ保存のテストが完了したあとに組み込みます！")
+    st.write("### 📊 シフト表のExcel出力")
+    
+    # Excel生成関数
+    def create_excel_file():
+        output = io.BytesIO()
+        wb = Workbook()
+        wb.remove(wb.active) # デフォルトの空シートを削除
+        
+        for d in days_of_week:
+            ws = wb.create_sheet(title=f"{d}曜日")
+            
+            # 1行目：ヘッダーの書き込み
+            headers = ["氏名", "休み"] + time_slots
+            ws.append(headers)
+            
+            # DBから最新のデータを取得して書き込み
+            df = load_weekly_data(d)
+            for s in staff_list:
+                match = df[df["staff_name"] == s]
+                if not match.empty:
+                    off_val = match.iloc[0]["off_status"]
+                    shift_vals = match.iloc[0]["shift_json"].split(",")
+                    # 空白を埋めてサイズを合わせる
+                    row_data = [s, off_val] + [shift_vals[i] if i < len(shift_vals) else "" for i in range(len(time_slots))]
+                else:
+                    row_data = [s, ""] + [""] * len(time_slots)
+                
+                ws.append(row_data)
+            
+            # 簡単な装飾（ヘッダーを太字＆グレー背景にして見やすく）
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="F0F0F0", end_color="F0F0F0", fill_type="solid")
+                
+            # 列幅の調整（氏名列だけ少し広く）
+            ws.column_dimensions['A'].width = 15
+                
+        wb.save(output)
+        return output.getvalue()
+
+    # Streamlitのダウンロードボタン
+    excel_data = create_excel_file()
+    st.download_button(
+        label="📥 全曜日のシフトをExcelでダウンロード",
+        data=excel_data,
+        file_name="シフト表_最新版.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary" # ここをprimaryにすることで、設定した赤色ボタンになります
+    )
