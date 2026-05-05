@@ -13,18 +13,8 @@ from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 
 st.set_page_config(page_title="日本橋乙女 シフト管理", layout="wide")
 
-st.markdown("""
-<style>
-div[data-testid="stButton"] button[kind="primary"] {
-    background-color: #ff4b4b !important;
-    border-color: #ff4b4b !important;
-    color: white !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
 # ==========================================
-# 1. データベース接続＆初期化
+# 1. データベース接続＆超堅牢な初期化
 # ==========================================
 @st.cache_resource
 def get_engine():
@@ -56,10 +46,7 @@ engine = get_engine()
 def init_db():
     if engine is None: return
     
-    # 🚨 ポイント: 1つの関数内で「engine.begin()」を何度も呼ぶことで、
-    # 各命令ごとに「接続→実行→コミット（またはエラーでロールバック）→切断」を完結させます。
-
-    # 1. 各テーブルの作成
+    # 各命令ごとに個別のトランザクションで実行（道連れエラー防止）
     for cmd in [
         "CREATE TABLE IF NOT EXISTS shift_data (day TEXT, staff_name TEXT, off_status TEXT, shift_json TEXT, PRIMARY KEY (day, staff_name));",
         "CREATE TABLE IF NOT EXISTS staff_master (staff_name TEXT PRIMARY KEY, password TEXT NOT NULL, role_name TEXT, is_admin BOOLEAN DEFAULT FALSE);",
@@ -69,17 +56,14 @@ def init_db():
             with engine.begin() as conn:
                 conn.execute(text(cmd))
         except Exception:
-            pass # すでに存在する場合は無視
+            pass
 
-    # 2. 既存テーブルへのカラム追加 (ここが一番コケやすい)
     try:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE staff_master ADD COLUMN staff_id TEXT;"))
     except Exception:
-        # すでにカラムがある場合は、ここで「この接続だけ」が失敗して終わるので、次に影響しない
         pass
 
-    # 3. 初期データの投入
     try:
         with engine.begin() as conn:
             result = conn.execute(text("SELECT COUNT(*) FROM staff_master")).scalar()
@@ -90,23 +74,10 @@ def init_db():
                 """))
     except Exception:
         pass
-            
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS system_config (
-                config_key TEXT PRIMARY KEY,
-                config_value TEXT
-            );
-        """))
-        result = conn.execute(text("SELECT COUNT(*) FROM staff_master")).scalar()
-        if result == 0:
-            conn.execute(text("""
-                INSERT INTO staff_master (staff_name, password, role_name, is_admin, staff_id) 
-                VALUES ('店長', 'admin1234', '全体統括', TRUE, '0000')
-            """))
-        conn.commit()
 
 init_db()
 
+# DB操作関数群
 def load_staff():
     return pd.read_sql("SELECT * FROM staff_master", engine)
 
@@ -117,16 +88,32 @@ def get_all_shift_data():
     return pd.read_sql("SELECT * FROM shift_data", engine)
 
 def save_day_data(day_str, df):
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         conn.execute(text(f"DELETE FROM shift_data WHERE day = '{day_str}'"))
         for _, row in df.iterrows():
             if row["氏名"] == "合計ライン": continue 
+            # タイムスロットのデータをカンマ区切りに変換
             shift_values = ",".join([str(row.get(t, "")) for t in time_slots])
             conn.execute(text("""
                 INSERT INTO shift_data (day, staff_name, off_status, shift_json)
                 VALUES (:day, :staff_name, :off_status, :shift_json)
             """), {"day": day_str, "staff_name": row["氏名"], "off_status": row["休み"], "shift_json": shift_values})
-        conn.commit()
+
+def get_config(key, default_value=""):
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT config_value FROM system_config WHERE config_key = :key"), {"key": key}).scalar()
+            return result if result else default_value
+    except:
+        return default_value
+
+def save_config(key, value):
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO system_config (config_key, config_value) 
+            VALUES (:key, :value) 
+            ON CONFLICT (config_key) DO UPDATE SET config_value = :value
+        """), {"key": key, "value": str(value)})
 
 # ==========================================
 # 2. セッション管理 & 固定値
@@ -141,20 +128,20 @@ if st.session_state.user is None:
     with st.form("login_form"):
         input_name = st.text_input("氏名")
         input_pass = st.text_input("パスワード", type="password")
-        submit = st.form_submit_button("ログイン", type="primary")
-        if submit:
+        if st.form_submit_button("ログイン", type="primary"):
             staff_df = load_staff()
             user_row = staff_df[(staff_df['staff_name'] == input_name) & (staff_df['password'] == input_pass)]
             if not user_row.empty:
-                st.session_state.user = {
-                    "name": user_row.iloc[0]['staff_name'],
-                    "is_admin": user_row.iloc[0]['is_admin'],
-                    "role": user_row.iloc[0]['role_name']
-                }
+                st.session_state.user = {"name": user_row.iloc[0]['staff_name'], "is_admin": user_row.iloc[0]['is_admin'], "role": user_row.iloc[0]['role_name']}
                 st.rerun()
             else:
-                st.error("氏名またはパスワードが間違っています。")
+                st.error("認証失敗")
     st.stop()
+
+st.sidebar.write(f"👤 {st.session_state.user['name']}")
+if st.sidebar.button("ログアウト"):
+    st.session_state.user = None
+    st.rerun()
 
 staff_df = load_staff()
 staff_list = staff_df['staff_name'].tolist()
@@ -164,83 +151,55 @@ staff_id_map = dict(zip(staff_df['staff_name'], staff_df['staff_id']))
 # 3. 👨‍💼 管理者ダッシュボード
 # ==========================================
 if st.session_state.user["is_admin"]:
-    st.title("👨‍💼 管理者ダッシュボード")
+    st.title("👨‍💼 管理者メニュー")
     tab1, tab2, tab3, tab4 = st.tabs(["📝 シフト編集", "📅 募集設定", "👥 スタッフ管理", "📊 Excel出力"])
     
     with tab1:
-        st.write("### 📝 シフト編集")
-        today = datetime.date.today()
-        target_date = st.date_input("日付選択", value=today)
+        target_date = st.date_input("日付選択", value=datetime.date.today())
         target_day_str = target_date.strftime("%Y-%m-%d")
         
+        # 週勤務計算
         start_of_week = target_date - datetime.timedelta(days=target_date.weekday())
-        end_of_week = start_of_week + datetime.timedelta(days=6)
-        pd_start = pd.to_datetime(start_of_week)
-        pd_end = pd.to_datetime(end_of_week)
-        
+        pd_start, pd_end = pd.to_datetime(start_of_week), pd.to_datetime(start_of_week + datetime.timedelta(days=6))
         all_df = get_all_shift_data()
         all_df['date_obj'] = pd.to_datetime(all_df['day'], errors='coerce')
-        all_df = all_df.dropna(subset=['date_obj'])
-        week_df = all_df[(all_df['date_obj'] >= pd_start) & (all_df['date_obj'] <= pd_end)]
+        week_df = all_df[(all_df['date_obj'] >= pd_start) & (all_df['date_obj'] <= pd_end)].dropna(subset=['date_obj'])
         
-        weekly_hours = {}
-        for s in staff_list:
-            staff_week = week_df[week_df['staff_name'] == s]
-            h_count = 0
-            for _, r in staff_week.iterrows():
-                slots = r["shift_json"].split(",")
-                h_count += sum([1 for slot in slots if slot in ['1', '2', '同']])
-            weekly_hours[s] = h_count * 0.5
-
-        raw_df = load_day_data(target_day_str)
         display_data = []
         total_counts = {t: 0 for t in time_slots}
-        
         for s in staff_list:
-            match = raw_df[raw_df["staff_name"] == s]
+            match = load_day_data(target_day_str).pipe(lambda d: d[d["staff_name"] == s])
+            
+            # 週勤務時間の集計
+            wk_h = week_df[week_df['staff_name'] == s]['shift_json'].str.split(',').explode().isin(['1','2','同']).sum() * 0.5
+            
             if not match.empty:
+                # 🚨「未提出」を排除し、空なら空のまま表示
                 status = match.iloc[0]["off_status"]
-                row = {"ID": staff_id_map.get(s, ""), "氏名": s, "週勤務時間": f"{weekly_hours[s]:.1f}", "休み": status}
+                row = {"ID": staff_id_map.get(s, ""), "氏名": s, "週勤務時間": f"{wk_h:.1f}", "休み": status}
                 slots = match.iloc[0]["shift_json"].split(",")
                 for j, t in enumerate(time_slots):
                     val = slots[j] if j < len(slots) else ""
                     row[t] = val
                     if val in ['1', '2', '同']: total_counts[t] += 1
             else:
-                row = {"ID": staff_id_map.get(s, ""), "氏名": s, "週勤務時間": f"{weekly_hours[s]:.1f}", "休み": "未提出", **{t: "" for t in time_slots}}
+                row = {"ID": staff_id_map.get(s, ""), "氏名": s, "週勤務時間": f"{wk_h:.1f}", "休み": "", **{t: "" for t in time_slots}}
             display_data.append(row)
         
-        total_row = {"ID": "", "氏名": "合計ライン", "週勤務時間": "-", "休み": ""}
-        for t in time_slots:
-            total_row[t] = str(total_counts[t])
-        display_data.append(total_row)
-        
+        display_data.append({"ID": "", "氏名": "合計ライン", "週勤務時間": "-", "休み": "", **{t: str(total_counts[t]) for t in time_slots}})
         df_to_edit = pd.DataFrame(display_data)
 
-        # ==========================================
-        # 🚨ここから：省略記号(...)を消すための設定
-        # ==========================================
+        # AgGrid設定
         editable_js = JsCode("function(params) { return params.node.data['氏名'] !== '合計ライン'; }")
-        
         cell_style_js = JsCode("""
         function(params) {
             const v = params.value;
-            let style = {
-                'fontSize': '11px', 
-                'textAlign': 'center', 
-                'padding': '0px', 
-                'borderRight': '1px solid #e2e2e2',
-                'textOverflow': 'clip',  // 🚨「...」を出さないように強制
-                'whiteSpace': 'nowrap'
-            };
-            
+            let style = {'fontSize': '11px', 'textAlign': 'center', 'padding': '0px', 'borderRight': '1px solid #e2e2e2', 'textOverflow': 'clip', 'whiteSpace': 'nowrap'};
             if (params.colDef.field === '氏名') style['textAlign'] = 'left';
-
             if (v === 'OFF' || v === '休') return Object.assign(style, {'backgroundColor': '#ff0000', 'color': '#ffffff'});
             if (v === '1') return Object.assign(style, {'backgroundColor': '#fce4d6'});
             if (v === '2') return Object.assign(style, {'backgroundColor': '#ffff00'});
             if (v === '同') return Object.assign(style, {'backgroundColor': '#00b050', 'color': '#ffffff'});
-
             if (params.node.data['氏名'] === '合計ライン') return Object.assign(style, {'backgroundColor': '#ffff00', 'fontWeight': 'bold'});
             return style;
         }
@@ -249,57 +208,32 @@ if st.session_state.user["is_admin"]:
         work_calc_js = JsCode("function(params) { if (params.node.data['氏名'] === '合計ライン') return '-'; let active = 0; const ts = [" + ",".join([f"'{t}'" for t in time_slots]) + "]; ts.forEach(t => { if (['1', '2', '同'].includes(params.data[t])) active++; }); return active === 0 ? '0' : (active * 0.5).toFixed(1); }")
         break_calc_js = JsCode("function(params) { if (params.node.data['氏名'] === '合計ライン') return '-'; let brk = 0; const ts = [" + ",".join([f"'{t}'" for t in time_slots]) + "]; ts.forEach(t => { if (params.data[t] === '休') brk++; }); return brk === 0 ? '0' : (brk * 0.5).toFixed(1); }")
 
+        # 列定義
         left_cols = [
             {"field": "ID", "pinned": "left", "width": 45, "editable": False, "cellStyle": cell_style_js},
             {"field": "氏名", "pinned": "left", "width": 85, "editable": False, "cellStyle": cell_style_js},
             {"headerName": "勤務h", "field": "勤務h", "pinned": "left", "width": 45, "editable": False, "valueGetter": work_calc_js, "cellStyle": cell_style_js},
             {"headerName": "休憩h", "field": "休憩h", "pinned": "left", "width": 45, "editable": False, "valueGetter": break_calc_js, "cellStyle": cell_style_js},
-            {"field": "休み", "pinned": "left", "width": 50, "editable": editable_js, "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["", "未提出", "OFF"]}, "cellStyle": cell_style_js}
+            # 🚨選択肢から「未提出」を削除
+            {"field": "休み", "pinned": "left", "width": 50, "editable": editable_js, "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["", "OFF"]}, "cellStyle": cell_style_js}
         ]
-        
-        time_cols = []
-        for h in range(8, 23):
-            children = []
-            for m in (0, 30):
-                t = f"{h}:{m:02d}"
-                children.append({
-                    "field": t, "headerName": "", "width": 25, "minWidth": 25, "editable": editable_js,
-                    "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["", "1", "2", "同", "休"]}, "cellStyle": cell_style_js
-                })
-            time_cols.append({"headerName": f"{h}", "children": children})
-            
+        time_cols = [{"headerName": f"{h}", "children": [{"field": f"{h}:{m:02d}", "headerName": "", "width": 25, "editable": editable_js, "cellEditor": 'agSelectCellEditor', "cellEditorParams": {'values': ["", "1", "2", "同", "休"]}, "cellStyle": cell_style_js} for m in (0, 30)]} for h in range(8, 23)]
         right_cols = [{"field": "週勤務時間", "pinned": "right", "width": 60, "editable": False, "cellStyle": cell_style_js}]
 
-        grid_options = {
-            "columnDefs": left_cols + time_cols + right_cols,
-            "defaultColDef": {"sortable": False, "suppressMenu": True, "resizable": True, "suppressMovable": True},
-            "enableRangeSelection": True, "suppressCopyRowsToClipboard": True, "enterMovesDownAfterEdit": True, "singleClickEdit": True, "rowHeight": 22, "headerHeight": 22, "groupHeaderHeight": 22
-        }
+        gb = GridOptionsBuilder.from_dataframe(df_to_edit)
+        grid_options = {"columnDefs": left_cols + time_cols + right_cols, "defaultColDef": {"sortable": False, "suppressMenu": True, "resizable": True, "suppressMovable": True}, "enableRangeSelection": True, "suppressCopyRowsToClipboard": True, "enterMovesDownAfterEdit": True, "singleClickEdit": True, "rowHeight": 22, "headerHeight": 22, "groupHeaderHeight": 22}
         
-        # 🚨 CSSでさらに余白を殺す
-        custom_css = {
-            ".ag-cell": {"padding": "0px !important"},
-            ".ag-header-cell": {"padding": "0px !important"},
-            ".ag-header-group-cell": {"padding": "0px !important"}
-        }
+        response = AgGrid(df_to_edit, gridOptions=grid_options, update_mode=GridUpdateMode.VALUE_CHANGED, allow_unsafe_jscode=True, theme='balham', height=500)
         
-        response = AgGrid(df_to_edit, gridOptions=grid_options, custom_css=custom_css, update_mode=GridUpdateMode.VALUE_CHANGED, fit_columns_on_grid_load=False, allow_unsafe_jscode=True, theme='balham', height=500)
-        
+        # オートセーブ
         edited_df = pd.DataFrame(response['data'])
         if not edited_df.empty and not df_to_edit.empty:
-            changed = False
-            for s in staff_list:
-                edited_row = edited_df[edited_df["氏名"] == s]
-                orig_row = df_to_edit[df_to_edit["氏名"] == s]
-                if not edited_row.empty and not orig_row.empty:
-                    if str(edited_row.iloc[0]["休み"]) != str(orig_row.iloc[0]["休み"]): changed = True; break
-                    for t in time_slots:
-                        if str(edited_row.iloc[0].get(t, "")) != str(orig_row.iloc[0].get(t, "")): changed = True; break
-            if changed:
+            if not edited_df.equals(df_to_edit):
                 save_day_data(target_day_str, edited_df)
-                st.toast("✅ 自動保存しました")
+                st.toast("✅ 自動保存完了")
                 st.rerun()
 
+    # タブ2〜4（前回のImage 2再現ロジック含む）はそのまま維持
     # タブ2,3,4 は変更なしのため省略
 
     # 【タブ2】募集設定
